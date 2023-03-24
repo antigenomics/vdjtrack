@@ -1,0 +1,145 @@
+---
+title: "T-cell survival: Tem vs Tcm"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+
+library(tidyverse)
+library(ggplot2)
+```
+
+Fetch metadata
+
+```{r}
+meta <- 
+  rbind(tibble(fname = list.files("../data/cellpop/d120_data"),
+               fpath = paste0("../data/cellpop/d120_data/", fname),
+               subset = "full", day = 120),
+        tibble(fname = list.files("../data/cellpop/d60_data"),
+               fpath = paste0("../data/cellpop/d60_data/", fname),
+               subset = "full", day = 60),
+        tibble(fname = list.files("../data/cellpop/DLI_TemTcm/Tcm_data"),
+               fpath = paste0("../data/cellpop/DLI_TemTcm/Tcm_data/", fname),
+               subset = "Tcm", day = 0),
+        tibble(fname = list.files("../data/cellpop/DLI_TemTcm/Tem_data"),
+               fpath = paste0("../data/cellpop/DLI_TemTcm/Tem_data/", fname),
+               subset = "Tem", day = 0)) %>%
+  mutate(patient = str_split_fixed(fname, "_", 2)[,1])
+```
+
+Load data
+
+```{r message = F}
+meta %>%
+  group_by(fpath, fname, subset, day, patient) %>%
+  group_modify(~read_tsv(.y$fpath)) %>%
+  mutate(cdr3 = ifelse(is.na(nSeqCDR3), CDR3.nucleotide.sequence, nSeqCDR3),
+         v = ifelse(is.na(bestVGene), V.gene, bestVGene),
+         count = ifelse(is.na(cloneCount), Read.count, cloneCount)) %>%
+  mutate(tcr_key = paste(v, cdr3)) %>%
+  group_by(subset, day, patient, tcr_key) %>%
+  summarise(count = sum(count)) %>%
+  ungroup -> data
+```
+
+Process data: count singletons and doubletons, select pre- and post-transplant 
+datasets and merge them, annotate Tem and Tcm
+
+```{r}
+data <- data %>%
+  mutate(quantile = case_when(
+    count == 1 ~ "singleton",
+    count == 2 ~ "doubleton",
+    .default = "large"
+  )) %>%
+  mutate(quantile = factor(quantile, levels = c("singleton",
+                                                "doubleton",
+                                                "large"))) 
+
+data.pre <- data %>% filter(day == 0) %>% select(-day, -count)
+data.post <- data %>% filter(day != 0) %>% select(-subset, -count)
+
+data.pre.m <- data.pre %>%
+  group_by(subset) %>%
+  group_modify(~left_join(.x, data.post %>% select(-quantile), 
+                          by = c("patient", "tcr_key"))) %>%
+  mutate(day = ifelse(is.na(day), "Missing", day))
+
+data.pre.s <- data.pre.m %>%
+  group_by(patient, subset, quantile, day) %>%
+  summarise(count = n() + 1) %>%
+  left_join(data.pre %>%
+         group_by(subset, patient, quantile) %>%
+         summarise(total = n() + 1) %>%
+         group_by(subset, patient) %>%
+         mutate(size.pre = sum(total))) %>%
+  left_join(data.post %>%
+         group_by(patient, day = as.character(day)) %>%
+         summarise(size.post = n() + 1))
+```
+
+Linear modelling of fraction donor sampled vs donor/recepient sample size, 
+compare Tem and Tcm
+
+```{r}
+data.pre.s %>%
+  filter(day != "Missing") %>%
+  mutate(day = paste("day", day)) %>%
+  ggplot(aes(x = size.post / size.pre, 
+             y = count / total,
+             color = quantile,
+             group = quantile
+             )) +
+  geom_vline(linetype ="dashed", xintercept = 1) +
+  geom_smooth(method = "lm", se = F) +
+  geom_point() +
+  scale_color_brewer(palette = "Set1") +
+  facet_grid(day ~ subset) +
+  scale_x_log10() + scale_y_log10() +
+  theme_classic() +
+  theme(aspect = 1,
+        legend.position = "bottom")
+
+lm(f ~ day + subset + f0, data.pre.s %>%
+  filter(day != "Missing") %>%
+    mutate(f = log10(count/total),
+           f0 = log10(size.post/size.pre))
+  ) %>%
+  summary
+```
+
+Show well-known fact of repertoire reconstitution. Note that not all donors have 
+paired samples
+
+```{r}
+data.post.s <- data.post %>%
+  group_by(patient, day, quantile) %>%
+  summarise(count = n()) %>%
+  group_by(patient, day) %>%
+  summarise(divChao = sum(count) + 
+              count[which(quantile == "singleton")] ^ 2 /
+              2 / count[which(quantile == "doubleton")])
+
+data.post.s %>%
+  ggplot(aes(x = as.factor(day),
+             y = divChao)) +
+  geom_line(aes(group = patient)) +
+  geom_boxplot(aes(group = day), width = 0.25) +
+  geom_point() +
+  scale_y_log10("Chao diversity index") +
+  xlab("day") +
+  theme_classic() +
+  theme(aspect = 1)
+
+t.test(I(log10(divChao)) ~ day, data.post.s)
+```
+
+```{r}
+#END
+```
+

@@ -1,0 +1,307 @@
+---
+title: "Emerging"
+author: "Anastasia Pavlova"
+date: '2022-10-24'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=60),tidy=TRUE)
+library(tidyverse)
+library(ggplot2)
+library(forcats)
+library(broom)
+library(ggbeeswarm)
+library(data.table)
+library(reshape2)
+library(ggridges)
+#!!! How to install brms, first we install 'V8' then the package itself
+#Sys.setenv(DOWNLOAD_STATIC_LIBV8 = 1)
+#install.packages(c("V8", "rstan", "brms"))
+library(brms)
+library(rstan)
+library(stringdist)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+get_os <- function(){
+  sysinf <- Sys.info()
+  if (!is.null(sysinf)){
+  os <- sysinf['sysname']
+  if (os == 'Darwin')
+    os <- "osx"
+  } else { ## mystery machine
+    os <- .Platform$OS.type
+    if (grepl("^darwin", R.version$os))
+      os <- "osx"
+    if (grepl("linux-gnu", R.version$os))
+      os <- "linux"
+  }
+  tolower(os)
+}
+if (get_os() == "osx") {
+  read_gz <- function(x) fread(paste("gzcat", x))
+} else {
+  read_gz <- function(x) fread(paste("zcat", x))
+}
+
+rename <- dplyr::rename
+select <- dplyr::select
+
+```
+
+
+```{r}
+setwd('/home/anpavlova/survival_new/YF')
+
+data.emerging <- readRDS('data.wide.df.rds')
+
+data.emerging <- data.emerging %>% 
+  mutate(emerging = (is.na(`-7`) & is.na(`0`) & (!is.na(`7`) | !is.na(`15`) | !is.na(`45`))))
+
+data.emerging %>%
+  filter(pre.quantile != 'Missing') %>% 
+  ggplot(aes(x = pre.quantile, 
+             fill = sample.id)) +
+  geom_bar(position = "dodge") +
+  scale_y_log10() +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  facet_wrap(~Epitope+emerging) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r, fig.width = 20, fig.height=20}
+
+alpha.prior <- 1
+beta.prior <- 1
+
+# define vectors containing time point names and their order
+s <- c(-7,  0,  7, 15, 45)
+j<-(1:length(s))
+
+alphabeta <- function(i){
+data.emerging %>% filter(pre.point == as.character(s[i])) %>%
+   select(-as.character(all_of(s[j[j<i]]))) %>% 
+   pivot_longer(as.character(all_of(s[(i+1):length(s)])), names_to = "time.point", values_to = "clone.count") %>% 
+   rename(pre.rep = as.character(s[i])) %>% 
+   filter(pre.quantile != "Missing") %>%
+   group_by(sample.id, time.point) %>%
+   mutate(total.pre = sum(pre.rep, na.rm = T), # total = total number of detected barcodes (UMI)
+         clones.pre = length(unique(aa.seq[!is.na(pre.rep)]))-1, # clones = clonal diversity, in other words number of  distinct clonotypes
+         total.post = sum(clone.count, na.rm = T),
+         clones.post = length(unique(aa.seq[!is.na(clone.count)]))-1) %>% 
+   group_by(sample.id, time.point, pre.quantile, pre.point) %>%
+   mutate(clones.pre.quant = length(unique(aa.seq[!is.na(pre.rep)]))-1) %>%
+   group_by(sample.id, time.point, pre.quantile, total.pre, clones.pre, total.post, clones.post, clones.pre.quant, pre.point, emerging, Epitope) %>%
+   summarize(alpha = sum(!is.na(clone.count)) + alpha.prior,
+             beta = sum(is.na(clone.count)) + beta.prior) %>%
+   ungroup
+}
+
+data.alphabeta <- lapply(head(j, -1), alphabeta)
+
+data.alphabeta <- do.call("rbind", data.alphabeta)
+
+data.prob <- data.alphabeta %>%
+  group_by(sample.id, time.point, pre.quantile, total.pre, clones.pre, total.post, clones.post, clones.pre.quant, pre.point, emerging) %>%
+  summarize(alpha = sum(alpha),
+            beta = sum(beta)) %>%
+     ungroup %>% 
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, time.point, pre.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta)) %>%
+  ungroup
+
+data.prob %>%
+  filter(emerging == T) %>%
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Spectral") +
+  facet_grid(pre.point~time.point, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")+
+  ggtitle("Emerging clones")
+
+data.prob %>%
+  filter(emerging == F) %>%
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Spectral") +
+  facet_grid(pre.point~time.point, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")+
+  ggtitle("Pre-existing clones")
+
+
+```
+
+```{r, fig.width=20, fig.height=20}
+data.alphabeta %>%
+  ggplot(aes(x = clones.post / clones.pre, y = alpha / (alpha + beta), 
+             group = paste(time.point, pre.quantile), 
+             linetype = time.point, shape = time.point,
+             color = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in receptient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_grid(pre.point~emerging) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+```
+
+If we recalculate capture probability grouping by YF epitope-specificity we'll see that emerging clones have lower capture probability comparing to pre-existing.
+
+```{r, fig.width=10, fig.height=10}
+
+data.alphabeta %>%
+  ggplot(aes(x = clones.post / clones.pre, y = alpha / (alpha + beta), 
+             group = paste(time.point, pre.quantile), 
+             linetype = time.point, shape = time.point,
+             color = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in receptient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_grid(Epitope~emerging) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+```
+
+```{r}
+data.coord <- data.alphabeta %>%
+  group_by(pre.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesSubsequent = log(clones.post),
+         logClonesInitial = log(clones.pre)) %>%
+  ungroup %>%
+  mutate(pre.quantile = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")),
+         Epitope = factor(Epitope, levels = c(NA, "LLWNGPMAV"), exclude = NULL),
+         emerging = factor(emerging, levels = c(FALSE, TRUE)))
+```
+
+Show coefficients of linear model
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         emerging = as.factor(emerging)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$emerging + .$Epitope) %>% tidy)
+```
+
+Show variance explained (ANOVA)
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         emerging = as.factor(emerging)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$emerging + .$Epitope) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```
+
+```{r, fig.width=20, fig.height=20}
+data.emerging %>%
+  filter(pre.point == 7 & replica == "F1") %>% 
+  select(-c (`-7`,`0`)) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`7`) ~ "Missing",
+    `7` == 1 ~ "Singleton",
+    `7` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`15`, `45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(plot.quantile != "Missing") %>%
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point + emerging) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom")
+```
+ 
+```{r, fig.width=20, fig.height=20}
+data.emerging %>%
+  filter(pre.point == 15 & replica == "F1") %>% 
+  select(-c (`-7`,`0`, `7`)) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`15`) ~ "Missing",
+    `15` == 1 ~ "Singleton",
+    `15` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(plot.quantile != "Missing") %>%
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point+emerging) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom")
+```

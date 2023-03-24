@@ -1,0 +1,297 @@
+---
+title: "T-cell survival model on pre-vaccination period"
+author: "Anastasia Pavlova"
+date: '2022-09-18'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(forcats)
+library(broom)
+library(ggbeeswarm)
+library(data.table)
+library(reshape2)
+library(ggridges)
+#!!! How to install brms, first we install 'V8' then the package itself
+#Sys.setenv(DOWNLOAD_STATIC_LIBV8 = 1)
+#install.packages(c("V8", "rstan", "brms"))
+library(brms)
+library(rstan)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+get_os <- function(){
+  sysinf <- Sys.info()
+  if (!is.null(sysinf)){
+  os <- sysinf['sysname']
+  if (os == 'Darwin')
+    os <- "osx"
+  } else { ## mystery machine
+    os <- .Platform$OS.type
+    if (grepl("^darwin", R.version$os))
+      os <- "osx"
+    if (grepl("linux-gnu", R.version$os))
+      os <- "linux"
+  }
+  tolower(os)
+}
+if (get_os() == "osx") {
+  read_gz <- function(x) fread(paste("gzcat", x))
+} else {
+  read_gz <- function(x) fread(paste("zcat", x))
+}
+
+rename <- dplyr::rename
+select <- dplyr::select
+
+setwd('/home/anpavlova/survival_new/YF')
+```
+
+## Load and refine data
+
+Let's test the model on vaccination dataset from Pogorelyy et al., 2018. The dataset consists of T-cell repertoire of six samples (three identical twin pairs) at several time points before and after immunization against yellow fever.
+
+```{r}
+setwd('/home/anpavlova/survival_new/YF')
+
+
+data.raw <- list.files("data", full.names = T) %>%
+  as.list %>%
+  lapply(function(x) read_gz(x) %>% mutate(sample.id = x)) %>%
+  rbindlist
+
+# here we retain relevant columns and create new ones extracting the sample characteristics from file names.
+
+data.long <-data.raw %>% mutate(time.point = str_split(sample.id, "_", simplify = T)[, 2],
+                                replica = str_split(sample.id, "_", simplify = T)[, 3],
+                                sample.id = stringr::str_extract(sample.id, pattern = "(?<=data/)(.*?)(?=_)"),
+                                best.V.gene = str_split(`All V hits`, "[(]", simplify = T)[, 1]) %>% 
+  select(c('sample.id', 'replica', 'time.point', 'Clone count', 'Clonal sequence(s)', 'best.V.gene', 'AA. Seq. CDR3')) %>% 
+  rename(clone.count = `Clone count`, nt.seq = `Clonal sequence(s)`, aa.seq = `AA. Seq. CDR3`)
+
+# transform time points into numeric value and add post/pre-vaccination variable
+data.long <- data.long %>% mutate(time.point = recode(time.point, "pre0" = "-7"))  %>% mutate(time.point = as.numeric(time.point)) 
+                                 #pre_post_vac = case_when(as.numeric(time.point) <= 0 ~ "pre-vac", as.numeric(time.point) > 0 ~ "post-vac"))
+
+saveRDS(data.raw, file = "data.raw.rds")
+rm(data.raw) #we don't need raw data anymore
+  
+```
+
+At first let's test the model on pre-vaccination period only.
+
+```{r tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+# Time point "pre0" (nearly 1 week before vaccination) is assigned as initial repertoire and the day of the vaccination ("0") - as the subsequent one and will be compared with "pre0".
+
+pre <- 'pre0' 
+post <- '0'
+
+# We split our donor dataset into singletons, doubletons, tripletons and higher-order clonotypes. 
+data.wide.pre0 <- data.long %>% 
+  filter(replica == "F1" & (time.point == "pre0" | time.point == "0")) %>% 
+  pivot_wider(names_from = time.point, values_from = clone.count) %>% 
+  rename(initial.rep = str_glue({pre}), subsequent.rep = str_glue({post})) %>% 
+  mutate(initial.quantile = case_when(
+    is.na(initial.rep) ~ "Missing",
+    initial.rep == 1 ~ "Singleton",
+    initial.rep == 2 ~ "Doubleton",
+    initial.rep == 3 ~ "Tripleton",
+    T ~ "Large"
+    ))
+
+data.wide.pre0 %>%
+  mutate(initial.rep = ifelse(is.na(initial.rep), 0, initial.rep)) %>%
+  ggplot(aes(x = sample.id, 
+             fill = initial.quantile %>% 
+               fct_reorder(initial.rep))) +
+  geom_bar() +
+  scale_fill_brewer("Size", palette = "Spectral") +
+  theme_classic() 
+
+data.wide.pre0 %>%
+  filter(initial.quantile != "Missing") %>%
+  ggplot(aes(x = initial.quantile, 
+             fill = sample.id)) +
+  geom_bar(position = "dodge") +
+  scale_y_log10() +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+The bar plot indicates that all quantiles have more than one thousand clonotypes and therefore can be used for subsequent statistical testing to reliably estimate the probability of recapturing a clonotype from a given subset of donor clonotypes. 
+
+```{r, fig.width = 10, fig.height=15, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+# summarize & estimate parameters of beta distribution
+alpha.prior <- 1
+beta.prior <- 1
+data.s.pre0 <- data.wide.pre0 %>%
+  filter(initial.quantile != "Missing") %>%
+  group_by(sample.id) %>%
+  mutate(total.initial = sum(initial.rep, na.rm = T), 
+        clones.initial = length(unique(aa.seq[!is.na(initial.rep)]))-1,
+        total.subsequent = sum(subsequent.rep, na.rm = T),
+        clones.subsequent = length(unique(aa.seq[!is.na(subsequent.rep)]))-1) %>% 
+  group_by(sample.id, initial.quantile) %>%
+  mutate(clones.initial.quant = length(unique(aa.seq[!is.na(initial.rep)]))-1) %>%
+  group_by(sample.id, initial.quantile, total.initial, clones.initial, total.subsequent, clones.subsequent, clones.initial.quant) %>%
+  summarize(alpha = sum(!is.na(subsequent.rep)) + alpha.prior,
+            beta = sum(is.na(subsequent.rep)) + beta.prior) %>%
+  ungroup
+
+# total. = total number of detected bar codes (UMI), clones. = clonal diversity, in other words number of  distinct clonotypes
+
+data.abp.pre0 <- data.s.pre0 %>%
+  merge(tibble(p = c(0:10000/10000, 10^(-40000:-10000/10000)))) %>%
+  group_by(sample.id, initial.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta)) %>%
+  ungroup
+
+data.abp.pre0 %>%
+  group_by(sample.id) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height/4, 
+             fill = factor(initial.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Spectral") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# for barplots instead of beta distribution 
+data.prob.bar.pre0 <- data.s.pre0 %>%
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, initial.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta),
+         meanbeta = alpha/(alpha+beta)) %>%
+  ungroup
+```
+The ridgeline plot shows that the capture probability is distinctly distributed according to quantiles.
+
+```{r, fig.width=8, fig.height=8}
+
+data.s.pre0 %>%
+  ggplot(aes(x = clones.subsequent / clones.initial, y = alpha / (alpha + beta), 
+             group = paste(initial.quantile), 
+             color = factor(initial.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in day '0' / clones in day 'pre0'") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+```{r}
+data.prob.yf.pre0 <- data.prob.bar.pre0 %>% 
+  group_by(sample.id) %>%
+  mutate(height = Pbeta/ max(Pbeta))
+
+data.prob.nonyf.pre0 <- data.prob.bar.pre0 %>% 
+  group_by(sample.id) %>%
+  mutate(height = Pbeta/ max(Pbeta),
+         median_prob = median(meanbeta))
+```
+
+```{r}
+ggplot() +
+  geom_segment(data = data.prob.nonyf.pre0, aes(x = meanbeta, xend = meanbeta, y = as.numeric(factor(sample.id)), yend = as.numeric(factor(sample.id)) + .9, colour = factor(initial.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))), size=1.7) +
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_colour_brewer("", palette = "Spectral") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+
+
+The capture probability of a clonotype depends not only on quantile identity, but also on the diversity of clones in initial and subsequent repertoires.
+
+## Basic linear modelling
+Quantifying the effect of various factors – number of clones detected in donor, number of clones detected
+in receptient and the frequency quantile of a given clonotype in donor – on the recapture probability.
+```{r}
+data.coord <- data.s.pre0 %>%
+  group_by(initial.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesSubsequent = log(clones.subsequent),
+         logClonesInitial = log(clones.initial)) %>%
+  ungroup %>%
+  mutate(initial.quantile = factor(initial.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))
+```
+
+Show coefficients of linear model
+
+```{r tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+data.coord %>%
+  ungroup %>%
+  mutate(initial.quantile = as.factor(initial.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$initial.quantile + .$logClonesSubsequent + .$logClonesInitial) %>% tidy)
+```
+
+Show variance explained (ANOVA)
+
+```{r tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+data.coord %>%
+  ungroup %>%
+  mutate(initial.quantile = as.factor(initial.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$initial.quantile + .$logClonesSubsequent + .$logClonesInitial) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```
+Log-transformed variables show extremely high correlation.
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(initial.quantile = as.factor(initial.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$initial.quantile + .$logClonesSubsequent + .$logClonesInitial) %>% glance)
+```
+
+## Origin of clones found in subsequent repertoire
+In all samples the most expanded clones (compared to initial repertoire) originated from "large" fraction, that is they were already expanded. However, there are some cases where expanded clones originally came from singletons (P1), doubletons or tripletons (S2).
+```{r, fig.width=8, fig.height=8}
+data.wide.pre0 %>%
+  mutate(initial.quantile = factor(initial.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large"))) %>%
+  filter(!is.na(subsequent.rep)) %>%
+  group_by(sample.id) %>%
+  mutate(rank = rank(-subsequent.rep, ties.method	= "first"),
+         freq.rec = subsequent.rep / sum(subsequent.rep)) %>%
+  filter(initial.quantile != "Missing") %>%
+  ggplot(aes(x = initial.quantile, y = rank)) +
+  geom_hline(yintercept = 100, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = initial.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_wrap(.~sample.id, scales = "free_x") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```

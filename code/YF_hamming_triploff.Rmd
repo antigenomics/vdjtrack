@@ -1,0 +1,719 @@
+---
+title: "T-cell survival: Hamming distance for YF-specificity"
+author: "Anastasia Pavlova"
+date: '2022-10-24'
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=60),tidy=TRUE)
+library(tidyverse)
+library(ggplot2)
+library(forcats)
+library(broom)
+library(ggbeeswarm)
+library(data.table)
+library(reshape2)
+library(ggridges)
+#!!! How to install brms, first we install 'V8' then the package itself
+#Sys.setenv(DOWNLOAD_STATIC_LIBV8 = 1)
+#install.packages(c("V8", "rstan", "brms"))
+library(brms)
+library(rstan)
+library(stringdist)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+get_os <- function(){
+  sysinf <- Sys.info()
+  if (!is.null(sysinf)){
+  os <- sysinf['sysname']
+  if (os == 'Darwin')
+    os <- "osx"
+  } else { ## mystery machine
+    os <- .Platform$OS.type
+    if (grepl("^darwin", R.version$os))
+      os <- "osx"
+    if (grepl("linux-gnu", R.version$os))
+      os <- "linux"
+  }
+  tolower(os)
+}
+if (get_os() == "osx") {
+  read_gz <- function(x) fread(paste("gzcat", x))
+} else {
+  read_gz <- function(x) fread(paste("zcat", x))
+}
+
+rename <- dplyr::rename
+select <- dplyr::select
+
+```
+
+## Load and refine data
+
+Let's test the model on vaccination dataset from Pogorelyy et al., 2018. The dataset consists of T-cell repertoire of six samples (three identical twin pairs) at several time points before and after immunization against yellow fever.
+
+```{r}
+setwd('/home/anpavlova/survival_new/YF')
+
+data.long <- readRDS("data.long.rds")
+  
+```
+
+## Load YF-specific database
+
+```{r}
+db = read.table(file = 'YFV.tsv', sep = '\t', header = TRUE) #initially the dataset has 697 observations loaded from VDJdb (epitope LLWNGPMAV)
+epi.db <- db %>% rename(aa.seq = CDR3, best.V.gene = V) %>%
+  filter(!grepl("TRAV", best.V.gene)) %>% distinct(aa.seq,Epitope) #after keeping only TRB chain, we get 405 unique YF-specific clonotypes against the aforementioned epitope
+epi.list <- epi.db %>% pull(aa.seq)
+
+```
+
+## Load YF-specific clones 
+
+```{r}
+#Compute distances between strings:
+
+get_distances <- function(aa.seq.1, aa.seq.2, threshold = 1,
+                          method = "hamming", ...) {
+  stringdistmatrix(unique(aa.seq.1), unique(aa.seq.2), 
+                   method = method,
+                   useNames = T, ...) %>%
+    melt %>%
+    filter(value <= threshold) %>%
+    rename(aa.seq = Var1, aa.seq.db = Var2, dist = value) %>%
+    mutate(aa.seq = as.character(aa.seq), aa.seq.db = as.character(aa.seq.db))
+}
+
+#An optimized routine that splits by length and processes in chunks(hamming only):
+
+get_1mm_pairs <- function(aa.seq, aa.seq.db, chunks = 64) {
+  d <- tibble(aa.seq = unique(aa.seq)) %>%
+    mutate(len = nchar(aa.seq),
+           chunk.id = rep(1:chunks, length.out = length(unique(aa.seq))))
+  
+  db <- tibble(aa.seq.db = unique(aa.seq.db)) %>%
+    mutate(len.db = nchar(aa.seq.db)) 
+  
+  d %>%
+    group_by(chunk.id, len) %>%
+    group_modify(~ get_distances(.x$aa.seq, db %>% 
+                                   filter(len.db == .y$len) %>%
+                                   .$aa.seq.db))
+}
+
+dist <- get_1mm_pairs(data.long$aa.seq, epi.db$aa.seq)
+
+#Now the general routine for tables in original format. Sample table should come first, database should come second.
+
+get_1mm_annot <- function(d, db) {
+  pairs <- get_1mm_pairs(d$aa.seq, db$aa.seq) %>% 
+    inner_join(db)
+  d %>%
+    left_join(pairs) %>%
+    select(-chunk.id, -len)
+}
+
+data.long.annot <- get_1mm_annot(data.long, epi.db)
+```
+
+## Clonotype grouping by size (quantiles)
+```{r}
+
+# define a vector containing time points
+s <- sort(unique(data.long$time.point))
+
+quantiles <- function(i){
+data.long.annot %>% 
+  pivot_wider(names_from = time.point, values_from = clone.count) %>% 
+  mutate(pre.quantile = case_when(
+    is.na(!! as.name(s[i])) ~ "Missing",
+    (!! as.name(s[i])) == 1 ~ "Singleton",
+    (!! as.name(s[i])) == 2 ~ "Doubleton",
+    (!! as.name(s[i])) == 3 ~ "Tripleton",
+    T ~ "Large"),
+    pre.point = s[i]) -> data.wide
+return(data.wide)
+}
+
+data.wide.list<-lapply(1:length(s), quantiles)
+
+data.wide.df <- do.call("rbind", data.wide.list)
+
+data.wide.tri %>%
+  filter(pre.quantile != "Missing") %>%
+  pivot_longer(as.character(all_of(s)), names_to = "time.point", values_to = "clone.count") %>% 
+  ggplot(aes(x = pre.quantile, 
+             fill = sample.id)) +
+  geom_bar(position = "dodge") +
+  scale_y_log10() +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  facet_wrap(~Epitope) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+data.wide.tri %>%
+  filter(pre.quantile != "Missing") %>%
+  pivot_longer(as.character(all_of(s)), names_to = "time.point", values_to = "clone.count") %>% 
+  mutate(pre_post_vac = case_when(as.numeric(time.point) <= 0 ~ "pre-vac",
+         as.numeric(time.point) > 0 ~ "post-vac")) %>% 
+  ggplot(aes(x = pre.quantile, 
+             fill = sample.id)) +
+  geom_bar(position = "dodge") +
+  scale_y_log10() +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  facet_wrap(~Epitope+pre_post_vac) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+```{r}
+data.wide.tri %>% filter(pre.quantile != "Missing") %>% group_by(Epitope, pre.quantile) %>% 
+     summarise(pre.rep = n()) %>% summarise(mean_pre.rep = mean(pre.rep))
+
+data.wide.tri %>% filter(pre.quantile != "Missing") %>% group_by(Epitope, pre.quantile) %>% 
+     summarise(pre.rep = n()) %>% group_by(Epitope,pre.quantile) %>% summarise(mean_pre.rep = mean(pre.rep))
+```
+
+
+where pre-vac are time points before vaccination (-7, 0) and post-vac - afetr vaccination (7,15,45).
+
+```{r,  fig.width = 20, fig.height=20}
+ 
+alpha.prior <- 1
+beta.prior <- 1
+
+j<-(1:length(s))
+
+alphabeta.tri <- function(i){
+data.wide.tri %>% filter(pre.point == as.character(s[i])) %>%
+   select(-as.character(all_of(s[j[j<i]]))) %>% 
+   pivot_longer(as.character(all_of(s[(i+1):length(s)])), names_to = "time.point", values_to = "clone.count") %>% 
+   rename(pre.rep = as.character(s[i])) %>% 
+   filter(pre.quantile != "Missing") %>%
+   group_by(sample.id, time.point) %>%
+   mutate(total.pre = sum(pre.rep, na.rm = T), 
+         clones.pre = length(unique(aa.seq[!is.na(pre.rep)]))-1, 
+         total.post = sum(clone.count, na.rm =  T),
+         clones.post = length(unique(aa.seq[!is.na(clone.count)]))-1) %>% 
+   group_by(sample.id, time.point, pre.quantile, pre.point) %>%
+   mutate(clones.pre.quant = length(unique(aa.seq[!is.na(pre.rep)]))-1) %>%
+  mutate(pre_post_vac = case_when(as.numeric(time.point) <= 0 ~ "pre-vac",                                     as.numeric(time.point) > 0 ~ "post-vac")) %>% 
+   group_by(sample.id, time.point, pre.quantile, total.pre, clones.pre, total.post, clones.post, clones.pre.quant, pre.point, pre_post_vac, Epitope) %>%
+   summarize(alpha = sum(!is.na(clone.count)) + alpha.prior,
+             beta = sum(is.na(clone.count)) + beta.prior) %>%
+   ungroup
+}
+
+data.alphabeta.list <-lapply(head(j, -1), alphabeta.tri)
+
+data.alphabeta.df <- do.call("rbind", data.alphabeta.list)
+
+
+data.prob <- data.alphabeta.df %>%
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, time.point, pre.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta),
+         meanbeta = alpha/(alpha+beta)) %>%
+  ungroup
+
+data.prob %>%
+  group_by(sample.id, time.point, Epitope) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(Epitope~pre.point+time.point, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+```
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>%
+  group_by(sample.id, time.point, pre.point, Epitope) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+```{r, fig.width = 20, fig.height=30}
+data.prob.yf<- data.prob %>% filter(!is.na(Epitope)) %>% 
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta))
+
+data.prob.nonyf<- data.prob %>% filter(is.na(Epitope)) %>% 
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta),
+         median_prob = median(meanbeta))
+
+
+```
+
+```{r, fig.width = 15, fig.height=15}
+ggplot() +
+  geom_ridgeline(color = NA, alpha = 0.9, data = data.prob.yf, aes(x = p, y=sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Large")))) +
+  geom_segment(data = data.prob.nonyf, aes(x = meanbeta, xend = meanbeta, y = as.numeric(factor(sample.id)), yend = as.numeric(factor(sample.id)) + .9, colour = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Large"))), size=1.7) +
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  #scale_color_brewer("", palette = "Set2") +
+  scale_colour_manual(values = saturation(brewer.pal(3, "Set2"), 0.7)) +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>% filter(!is.na(Epitope)) %>% 
+  group_by(sample.id, time.point) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(pre.point~time.point, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+```{r, fig.width=20, fig.height=20}
+
+data.alphabeta.df %>%
+  ggplot(aes(x = clones.post / clones.pre, y = alpha / (alpha + beta), 
+             group = paste(time.point, pre.quantile), 
+             linetype = time.point, shape = time.point,
+             color = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in receptient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Set1") +
+  facet_grid(pre.point~Epitope+time.point) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+## Basic linear modelling
+
+Quantifying the effect of various factors -- number of clones detected in donor, number of clones detected in recipient and the frequency quantile of a given clonotype in donor -- on the recapture probability. Log-transformed variables show extremely high correlation.
+
+### with +
+
+```{r}
+data.coord.rbind <- data.alphabeta.df %>%
+  group_by(pre.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesSubsequent = log(clones.post),
+         logClonesInitial = log(clones.pre)) %>%
+  ungroup %>%
+  mutate(pre.quantile = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")),
+         Epitope = factor(Epitope, levels = c(NA, "LLWNGPMAV"), exclude = NULL),
+         pre_post_vac = factor(pre_post_vac, levels = c("pre-vac", "post-vac")))
+```
+
+Show coefficients of linear model
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         pre_post_vac = as.factor(pre_post_vac)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$pre_post_vac + .$Epitope) %>% tidy)
+```
+
+Show variance explained (ANOVA)
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         pre_post_vac = as.factor(pre_post_vac)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$pre_post_vac + .$Epitope) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```
+
+
+### with *
+
+```{r}
+data.coord.rbind <- data.alphabeta.df %>%
+  group_by(pre.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesSubsequent = log(clones.post),
+         logClonesInitial = log(clones.pre)) %>%
+  ungroup %>%
+  mutate(pre.quantile = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")),
+         Epitope = factor(Epitope, levels = c(NA, "LLWNGPMAV"), exclude = NULL),
+         pre_post_vac = factor(pre_post_vac, levels = c("pre-vac", "post-vac")))
+```
+
+Show coefficients of linear model
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         pre_post_vac = as.factor(pre_post_vac)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$pre_post_vac * .$Epitope) %>% tidy)
+```
+
+Show variance explained (ANOVA)
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         pre_post_vac = as.factor(pre_post_vac)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$time.point + .$logClonesSubsequent + .$logClonesInitial + .$pre_post_vac * .$Epitope) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```
+```{r}
+data.coord.rbind %>%
+  filter(pre.point == 15 & time.point == 45) %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$Epitope) %>% tidy)
+```
+
+
+## Ranked
+
+```{r, fig.width=20, fig.height=20}
+
+data.wide.df %>%
+  filter(pre.point == -7 & replica == "F1") %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`-7`) ~ "Missing",
+    `-7` == 1 ~ "Singleton",
+    `-7` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`0`, `7`, `15`, `45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                        "Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('0', '7', '15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        aspect = 1, legend.position = "bottom")+
+  ggtitle("Pre-point = -7")
+
+```
+
+
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  filter(pre.point == 0 & replica == "F1") %>% 
+  select(- `-7`) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`0`) ~ "Missing",
+    `0` == 1 ~ "Singleton",
+    `0` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`7`, `15`, `45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('7', '15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("Pre-point = 0")
+```
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  filter(pre.point == 7 & replica == "F1") %>% 
+  select(-c (`-7`,`0`)) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`7`) ~ "Missing",
+    `7` == 1 ~ "Singleton",
+    `7` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`15`, `45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("Pre-point = 7")
+```
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  filter(pre.point == 15 & replica == "F1") %>% 
+  select(-c (`-7`,`0`, `7`)) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`15`) ~ "Missing",
+    `15` == 1 ~ "Singleton",
+    `15` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = sample.id, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = sample.id)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(plot.quantile~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("Pre-point = 15")
+```
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  filter(pre.point == 15 & replica == "F1") %>% 
+  select(-c (`-7`,`0`, `7`)) %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`15`) ~ "Missing",
+    (`15` == 1 | `15` == 2) ~ "Singleton/Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton/Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = sample.id, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = sample.id)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(plot.quantile~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("Pre-point = 15")
+```
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  pivot_longer(as.character(all_of(s)), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = case_when(
+    pre.quantile == "Missing" ~ "Missing",
+    (pre.quantile == "Singleton" | pre.quantile == "Doubleton") ~ "Singleton/Doubleton",
+    T ~ "Large"
+    )) %>% 
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton/Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('0', '7','15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = sample.id, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = sample.id)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(plot.quantile~pre.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("all_pre-points")
+```
+
+```{r, fig.width=20, fig.height=20}
+data.wide.df %>%
+  pivot_longer(as.character(all_of(s)), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = case_when(
+    pre.quantile == "Missing" ~ "Missing",
+    pre.quantile == "Singleton" ~ "Singleton",
+    pre.quantile == "Doubleton" ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                          "Singleton",
+                                                          "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('0', '7','15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(!is.na(Epitope)) %>% 
+  ggplot(aes(x = sample.id, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = sample.id)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(plot.quantile~pre.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), panel.border = element_rect(color = "black", fill = NA, size = 1), aspect = 1, legend.position = "bottom") +
+  ggtitle("all_pre-points")
+```
+
+
+```{r, fig.width=20, fig.height=20}
+
+data.wide.df %>%
+  filter(pre.point == -7 & replica == "F1") %>% 
+  mutate(plot.quantile = case_when(
+    is.na(`-7`) ~ "Missing",
+    `-7` == 1 ~ "Singleton",
+    `-7` == 2 ~ "Doubleton",
+    T ~ "Large"
+    )) %>% 
+  pivot_longer(c(`0`, `7`, `15`, `45`), names_to = "time.point", values_to = "clone.count") %>%
+  mutate(plot.quantile = factor(plot.quantile, levels = c("Missing",
+                                                        "Singleton",
+                                                       "Doubleton",
+                                                       "Large")),
+         time.point = factor(time.point, levels = c('0', '7', '15', '45'))) %>%
+  filter(!is.na(clone.count)) %>%
+  group_by(sample.id,time.point, pre.point) %>%
+  mutate(rank = rank(-clone.count, ties.method	= "first"),
+         freq.rec = clone.count / sum(clone.count)) %>%
+  filter(is.na(Epitope)) %>% 
+  ggplot(aes(x = plot.quantile, y = rank)) +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = plot.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Set2") +
+  facet_grid(sample.id ~ time.point) +
+  theme_classic() +
+  theme(panel.spacing = unit(.05, "lines"), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        aspect = 1, legend.position = "bottom")+
+  ggtitle("Not only YF, Pre-point = -7")
+
+```

@@ -1,0 +1,302 @@
+---
+title: "T-cell survival: DLI"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(forcats)
+library(broom)
+library(ggbeeswarm)
+library(data.table)
+library(reshape2)
+library(ggridges)
+#!!! How to install brms, first we install 'V8' then the package itself
+#Sys.setenv(DOWNLOAD_STATIC_LIBV8 = 1)
+#install.packages(c("V8", "rstan", "brms"))
+library(brms)
+library(rstan)
+library(formatR)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+
+get_os <- function(){
+  sysinf <- Sys.info()
+  if (!is.null(sysinf)){
+  os <- sysinf['sysname']
+  if (os == 'Darwin')
+    os <- "osx"
+  } else { ## mystery machine
+    os <- .Platform$OS.type
+    if (grepl("^darwin", R.version$os))
+      os <- "osx"
+    if (grepl("linux-gnu", R.version$os))
+      os <- "linux"
+  }
+  tolower(os)
+}
+if (get_os() == "osx") {
+  read_gz <- function(x) fread(paste("gzcat", x))
+} else {
+  read_gz <- function(x) fread(paste("zcat", x))
+}
+
+rename <- dplyr::rename
+select <- dplyr::select
+```
+
+## Load data
+
+Load datasets and mark DLI patients. Check number of clonotypes in donors and receptients - we have engough clones for statistics everywhere. We group clones by their abundance in donors: 1 (singletons), 2 (doubletons), 3 (tripletons) and 4+ reads (Large). The choice is dictated by observing the fact that for rare events Poisson distribution shows huge difference in capture probability for $\lambda \in [1,3]$ while smaller $\lambda$ values are unlikely to be encountered and quantified. Moreover, for large clones, each hyperexpanded variant has its own history and, likely, its own dynamic, so binning them to different bins based on minor differences in frequency (e.g. $0.1\%$ vs $0.01\%$) makes little sense.
+
+```{r message=FALSE, warning=FALSE}
+setwd('/home/anpavlova/survival_new/DLI')
+
+data <- list.files("data", full.names = T) %>%
+  as.list %>%
+  lapply(function(x) read_gz(x) %>% mutate(sample.id = x)) %>%
+  rbindlist %>%
+  mutate(sample.id.old = sample.id,
+         dli = !str_starts(sample.id.old, fixed("data/sh.p")),
+         sample.id = paste0("D", sample.id %>% as.factor %>% as.integer, ifelse(dli, "*", "")))
+
+data %>%
+  select(sample.id.old, dli, sample.id) %>%
+  unique
+
+data %>% count(dli, sample.id)
+
+data <- data %>%
+  mutate(donor.quantile = case_when(
+    is.na(cloneCount.don) ~ "Missing",
+    cloneCount.don == 1 ~ "Singleton",
+    cloneCount.don == 2 ~ "Doubleton",
+    cloneCount.don == 3 ~ "Tripleton",
+    T ~ "Large"
+    ))
+
+data %>%
+  mutate(cloneCount.don = ifelse(is.na(cloneCount.don), 0, cloneCount.don)) %>%
+  ggplot(aes(x = sample.id, 
+             fill = donor.quantile %>% 
+               fct_reorder(cloneCount.don))) +
+  geom_bar() +
+  scale_fill_brewer("Size", palette = "Spectral") +
+  theme_classic() 
+
+data %>%
+  filter(donor.quantile != "Missing") %>%
+  ggplot(aes(x = donor.quantile, 
+             fill = sample.id)) +
+  geom_bar(position = "dodge") +
+  scale_y_log10() +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  geom_hline(yintercept = 1000, linetype = "dashed") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+## Modeling probability of "survival" for clones using Beta distribution
+
+We split our donor dataset into singletons, doubletons, tripletons and higher-order clonotypes. Each of these subsets contains enough clones to reliably estimate the probability of recapturing a clonotype from a given subset of donor clonotypes. Interestingly, the ration between recapturing probabilities of singletons, doubletons and tripletons is in line with exponential difference stemming from Poisson distribution.
+
+```{r tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+# summarize & estimate parameters of beta distribution
+alpha.prior <- 1
+beta.prior <- 1
+data.s <- data %>%
+  filter(donor.quantile != "Missing") %>%
+  group_by(sample.id) %>%
+  mutate(total.don = sum(cloneCount.don, na.rm = T),
+         clones.don = length(unique(aaSeqCDR3.don)) -1,
+         total.rec = sum(cloneCount.rec, na.rm = T),
+         clones.rec = length(unique(aaSeqCDR3.rec)) -1) %>%
+  group_by(sample.id, donor.quantile) %>%
+  mutate(clones.don.quant = length(unique(aaSeqCDR3.don))) %>%
+  group_by(dli, sample.id, donor.quantile, total.don, clones.don, total.rec, clones.rec, clones.don.quant) %>%
+  summarize(alpha = sum(!is.na(cloneCount.rec)) + alpha.prior,
+            beta = sum(is.na(cloneCount.rec)) + beta.prior) %>%
+  ungroup
+
+data.sp <- data.s %>%
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, donor.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta)) %>%
+  ungroup
+
+data.sp %>%
+  mutate(dli = ifelse(dli, "DLI", "non-DLI")) %>%
+  #filter(dli == "non-DLI") %>% 
+  group_by(sample.id) %>%
+  mutate(height = Pbeta / max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(donor.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(0.8e-4, 1e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Spectral") +
+  facet_wrap(~dli, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+ggsave("DLI/plots/beta_non-DLI.pdf")
+```
+
+Interestingly, the TCR recovery rate is related both to the total number of clones in donor and recipient. It is also different for DLI and non-DLI patients.
+
+```{r fig.width=8, fig.height=8}
+data.s %>%
+  mutate(dli = ifelse(dli, "DLI", "non-DLI")) %>%
+  filter(dli == "non-DLI") %>% 
+  ggplot(aes(x = clones.rec / clones.don, y = alpha / (alpha + beta), 
+             group = paste(donor.quantile, dli), 
+             linetype = dli, shape = dli,
+             color = factor(donor.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in receptient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+```{r fig.width=8, fig.height=8}
+data.s %>%
+  mutate(dli = ifelse(dli, "DLI", "non-DLI")) %>%
+  filter(dli == "DLI") %>% 
+  ggplot(aes(x = clones.don / clones.rec, y = alpha / (alpha + beta), 
+             group = paste(donor.quantile), 
+             #linetype = dli, shape = dli,
+             color = factor(donor.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in donor / clones in recepient") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+## Basic linear modelling
+
+Quantifying the effect of various factors -- number of clones detected in donor, number of clones detected in receptient and the frequency quantile of a given clonotype in donor -- on the recapture probability. Log-transformed variables show extremely high correlation.
+
+```{r}
+data.coord <- data.s %>%
+  group_by(donor.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesRecepient = log(clones.rec),
+         logClonesDonor = log(clones.don)) %>%
+  ungroup %>%
+  mutate(donor.quantile = factor(donor.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))
+```
+
+Show coefficients of linear model
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(donor.quantile = as.factor(donor.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$donor.quantile + .$dli + .$logClonesRecepient + .$logClonesDonor) %>% tidy) %>%
+  write.table(., "/home/anpavlova/survival_new/DLI/lm.dli.txt", row.names = F, sep="\t")
+```
+
+```{r}
+write.table(data.coord, "/home/anpavlova/survival_new/DLI/data.coord.dli.txt", row.names = F, sep="\t")
+```
+
+
+Show variance explained (ANOVA)
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(donor.quantile = as.factor(donor.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$donor.quantile + .$dli + .$logClonesRecepient + .$logClonesDonor) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```
+
+```{r}
+data.coord %>%
+  ungroup %>%
+  mutate(donor.quantile = as.factor(donor.quantile)) %>%
+  do(lm(.$logRecaptureProb ~ .$donor.quantile + .$dli + .$logClonesRecepient + .$logClonesDonor) %>% glance)
+```
+
+Origin of clones found in recepient: number of highly expanded clones that originated from expanded donor clones and rare donor clones varies and depends on donor. In general clonotypes preserve their size, but there is lots of noise here. 
+
+> Open question - show this statistically, that survival prob depends not just on sampling, but is more skewed and depends on clonotype size.
+
+```{r fig.width=8, fig.height=8}
+data %>%
+  mutate(donor.quantile = factor(donor.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large"))) %>%
+  filter(dli & !is.na(cloneCount.rec)) %>%
+  group_by(sample.id) %>%
+  mutate(rank = rank(-cloneCount.rec, ties.method	= "first"),
+         freq.rec = cloneCount.rec / sum(cloneCount.rec)) %>%
+  filter(donor.quantile != "Missing") %>%
+  ggplot(aes(x = donor.quantile, y = rank)) +
+  geom_hline(yintercept = 100, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = donor.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_wrap(.~sample.id, scales = "free_x") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom") +
+  ggtitle("DLI")
+
+data %>%
+  mutate(donor.quantile = factor(donor.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large"))) %>%
+  filter(!dli & !is.na(cloneCount.rec)) %>%
+  group_by(sample.id) %>%
+  mutate(rank = rank(-cloneCount.rec, ties.method	= "first"),
+         freq.rec = cloneCount.rec / sum(cloneCount.rec)) %>%
+  filter(donor.quantile != "Missing") %>%
+  ggplot(aes(x = donor.quantile, y = rank)) +
+  geom_hline(yintercept = 100, linetype = "dashed") +
+  geom_quasirandom(aes(size = freq.rec, color = donor.quantile)) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  coord_flip() +
+  scale_y_log10("Clonotype rank") +
+  xlab("") +
+  scale_size_continuous("Clonotype size") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_wrap(.~sample.id, scales = "free_x") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom") +
+  ggtitle("Non-DLI")
+```
+

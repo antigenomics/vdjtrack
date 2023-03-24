@@ -1,0 +1,123 @@
+---
+title: "Sampling in aging test"
+author: "M.S."
+date: "2023-02-21"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+PATH <- function(x) paste0("../data/aging_3year/", x)
+```
+
+```{r}
+meta <- read_tsv(PATH("metadata.txt"))
+meta
+```
+
+```{r}
+data <- meta %>%
+  group_by(donor, age) %>%
+  group_modify(~read_tsv(PATH(.x$file.name))) %>%
+  ungroup %>%
+  mutate(tcrkey = paste(v, cdr3nt)) %>%
+  group_by(donor, age, tcrkey) %>%
+  summarise(count = sum(count)) %>%
+  ungroup
+```
+
+```{r}
+data.1 <- data %>%
+  left_join(data %>% 
+              inner_join(data,
+                         by = c("donor", "tcrkey")) %>%
+              filter(age.x != age.y) %>%
+              select(-age.x, -age.y) %>%
+              select(donor, tcrkey) %>%
+              unique %>%
+              mutate(overlapping = T)) %>%
+  mutate(overlapping = !is.na(overlapping))
+```
+
+```{r}
+set.seed(42)
+
+na_to_null <- function(x) {
+  as.integer(ifelse(is.na(x), 0, x))
+}
+
+counts <- rpois(100, 2)
+
+get_freq_table <- function(x) {
+  tibble(count = x) %>%
+    group_by(count) %>%
+    summarise(species = n() %>% as.numeric())
+}
+
+get_freq_table(counts)
+
+rarefy <- function(freq_tbl, count_star) {
+  count_total = sum(freq_tbl$count * freq_tbl$species)
+  
+  areas <- tibble(
+    count_star = count_star,
+    count_total = count_total,
+    phi = count_star / count_total,
+    interpolation = count_total >= count_star 
+  ) %>%
+    unique
+  
+  freq_tbl <- freq_tbl %>%
+    mutate(F1 = sum(species[which(count == 1)]),
+           F2 = sum(species[which(count == 2)]),
+           Sobs = sum(species),
+           Sunseen = F1 * F1 / 2 / F2,
+           Sest = Sobs + Sunseen)
+  
+  rbind(
+    freq_tbl %>%
+      cross_join(areas %>% filter(interpolation)) %>%
+      group_by(count_star, interpolation, Sobs, Sest, count_total) %>%
+      summarise(Sarea = sum(species * (1 - (1 - phi) ^ count)),
+                VarSarea = sum(species * (1 - (1 - phi) ^ count)^2) - 
+                  Sarea[1] * Sarea[1] / Sest[1]),
+    freq_tbl %>%
+      cross_join(areas %>% filter(!interpolation)) %>%
+      group_by(count_star, interpolation, Sobs, Sest, count_total) %>%
+      summarise(Sarea = Sobs[1] + 
+                  Sunseen[1] * (1 - exp(-(phi[1] - 1) * F1[1] / Sunseen[1])),
+                VarSarea = NA)
+  ) %>%
+    ungroup
+}
+
+rarefy(get_freq_table(counts), c(10, 50, 500) %>% as.integer)
+```
+
+```{r}
+points <- seq(1, 10000000, length.out = 101) %>% as.numeric()
+
+data.1 %>%
+  group_by(donor, age, overlapping) %>%
+  group_modify(~get_freq_table(.x$count) %>% 
+                 rarefy(points)) -> data.r
+
+data.r %>%
+  filter(count_star > 100) %>%
+  ggplot(aes(x = count_star, y = Sarea, 
+             group = paste(age, overlapping),
+             color = factor(age), linetype = overlapping)) +
+  geom_point(data = data.r, aes(x = count_total, y = Sobs)) +
+  geom_path() +
+  scale_y_log10() +
+  scale_color_brewer(palette = "Paired") +
+  theme_bw()
+```
+
+```{r}
+```

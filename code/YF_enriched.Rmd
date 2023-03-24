@@ -1,0 +1,314 @@
+---
+title: "enriched"
+author: "Anastasia Pavlova"
+date: '2022-11-23'
+output: html_document
+---
+
+```{r}
+s <- sort(unique(enriched$time.point))
+
+alpha.prior <- 1
+beta.prior <- 1
+
+j<-(1:length(s))
+
+alphabeta.enriched <- function(i){
+enriched2 %>% filter(pre.point == as.character(s[i])) %>%
+   select(-as.character(all_of(s[j[j<i]]))) %>% 
+   pivot_longer(as.character(all_of(s[(i+1):length(s)])), names_to = "time.point", values_to = "clone.count") %>% 
+   rename(pre.rep = as.character(s[i])) %>% 
+   filter(pre.quantile != "Missing") %>%
+   group_by(sample.id, time.point) %>%
+   mutate(total.pre = sum(pre.rep, na.rm = T), 
+         clones.pre = length(unique(aa.seq[!is.na(pre.rep)]))-1, 
+         total.post = sum(clone.count, na.rm =  T),
+         clones.post = length(unique(aa.seq[!is.na(clone.count)]))-1) %>% 
+   group_by(sample.id, time.point, pre.quantile, pre.point) %>%
+   mutate(clones.pre.quant = length(unique(aa.seq[!is.na(pre.rep)]))-1) %>%
+  mutate(pre_post_vac = case_when(as.numeric(time.point) <= 0 ~ "pre-vac",                                     as.numeric(time.point) > 0 ~ "post-vac")) %>% 
+   group_by(sample.id, time.point, pre.quantile, total.pre, clones.pre, total.post, clones.post, clones.pre.quant, pre.point, Epitope, enriched) %>%
+   summarize(alpha = sum(!is.na(clone.count)) + alpha.prior,
+             beta = sum(is.na(clone.count)) + beta.prior) %>%
+   ungroup
+}
+
+data.alphabeta.list <-lapply(head(j, -1), alphabeta.enriched)
+
+data.alphabeta.enriched <- do.call("rbind", data.alphabeta.list)
+
+data.prob <- data.alphabeta.enriched %>%
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, time.point, pre.quantile, enriched) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta),
+         meanbeta = alpha/(alpha+beta)) %>%
+  ungroup
+
+data.prob %>%
+  group_by(sample.id, time.point, enriched) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(enriched~pre.point+time.point, scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+```
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>%
+  group_by(sample.id, time.point, pre.point, enriched) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid((~enriched), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>%
+  group_by(sample.id, time.point, pre.point, enriched) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>% filter(enriched == T) %>% 
+  group_by(sample.id, time.point, pre.point, enriched) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+
+```{r, fig.width = 20, fig.height=10}
+data.prob %>% filter(enriched == F) %>% 
+  group_by(sample.id, time.point, pre.point, enriched) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+
+
+```{r, fig.width = 20, fig.height=30}
+data.prob.en<- data.prob %>% filter(enriched == T) %>% 
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta))
+
+data.prob.nonen<- data.prob %>% filter(enriched == F) %>% 
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta),
+         median_prob = median(meanbeta))
+
+
+
+ggplot() +
+  geom_ridgeline(color = NA, alpha = 0.9, data = data.prob.en, aes(x = p, y=sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Large")))) +
+  geom_segment(data = data.prob.nonen, aes(x = meanbeta, xend = meanbeta, y = as.numeric(factor(sample.id)), yend = as.numeric(factor(sample.id)) + .9, colour = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                      "Large"))), size=1.7) +
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  #scale_color_brewer("", palette = "Set2") +
+  scale_colour_manual(values = saturation(brewer.pal(3, "Set2"), 0.7)) +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+
+
+```
+
+```{r fig.width = 15, fig.height=15}
+data.prob <- data.alphabeta.enriched %>%
+  group_by(sample.id, time.point, pre.quantile, total.pre, clones.pre, total.post, clones.post, clones.pre.quant, pre.point, enriched) %>%
+  summarize(alpha = sum(alpha),
+            beta = sum(beta)) %>%
+     ungroup %>% 
+  merge(tibble(p = c(0:1000/1000, 10^(-4000:-1000/1000)))) %>%
+  group_by(sample.id, time.point, pre.quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta)) %>%
+  ungroup
+
+data.prob %>%
+  filter(enriched == T) %>%
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                    "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(0.5e-2, 7e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")+
+  ggtitle("Emerging clones")
+
+data.prob %>%
+  filter(enriched == F) %>%
+  group_by(sample.id, time.point, pre.point) %>%
+  mutate(height = Pbeta/ max(Pbeta)) %>%
+  ggplot(aes(x = p, y = sample.id, height = height, 
+             fill = factor(pre.quantile, levels = c("Singleton",
+                                                      "Doubleton",
+                                                    "Tripleton",
+                                                      "Large"))
+  )) +
+  geom_ridgeline(color = NA, alpha = 0.9) + 
+  scale_x_log10("Capture probability", limits = c(1e-2, 9e-1)) + ylab("Pbeta") +
+  scale_fill_brewer("", palette = "Set2") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~factor(time.point, levels = c('0', '7', '15', '45')), scales = "free_y") +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")+
+  ggtitle("Pre-existing clones")
+
+```
+
+
+```{r, fig.width=20, fig.height=20}
+
+data.alphabeta.enriched %>%
+  ggplot(aes(x = clones.post / clones.pre, y = alpha / (alpha + beta), 
+             group = paste(time.point, pre.quantile), 
+             linetype = time.point, shape = time.point,
+             color = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in receptient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_grid(factor(pre.point, levels = c('-7', '0', '7', '15'))~enriched+factor(time.point, levels = c('0', '7', '15', '45'))) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+
+```{r, fig.width=20, fig.height=20}
+
+data.alphabeta.enriched %>% 
+  ggplot(aes(x = clones.post / clones.pre, y = alpha / (alpha + beta), 
+             group = paste(pre.quantile), 
+             #linetype = time.point, shape = time.point,
+             color = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")))) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "white") +
+  scale_x_log10("Clones in initial repertoire / clones in subsequent") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Spectral") +
+  facet_grid(Epitope~enriched) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+
+## Basic linear modelling
+
+```{r}
+data.coord.rbind <- data.alphabeta.enriched %>%
+  group_by(pre.quantile) %>%
+  mutate(logRecaptureProb = log(alpha / (alpha + beta)), 
+         logClonesSubsequent = log(clones.post),
+         logClonesInitial = log(clones.pre)) %>%
+  ungroup %>%
+  mutate(pre.quantile = factor(pre.quantile, levels = c("Singleton",
+                                                       "Doubleton",
+                                                       "Tripleton",
+                                                       "Large")),
+         Epitope = factor(Epitope, levels = c(NA, "LLWNGPMAV"), exclude = NULL),
+         enriched = factor(enriched, levels = c(TRUE, FALSE)))
+```
+
+Show coefficients of linear model
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         enriched = as.factor(enriched)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$enriched + .$Epitope) %>% tidy)
+```
+
+
+Show variance explained (ANOVA)
+
+```{r}
+data.coord.rbind %>%
+  ungroup %>%
+  mutate(pre.quantile = as.factor(pre.quantile),
+         Epitope = as.factor(Epitope),
+         enriched = as.factor(enriched)) %>%
+  do(lm(.$logRecaptureProb ~ .$pre.quantile + .$logClonesSubsequent + .$logClonesInitial + .$enriched + .$Epitope) %>% aov %>% tidy) %>%
+  mutate(var.explained.pct = sumsq / sum(sumsq) * 100) 
+```

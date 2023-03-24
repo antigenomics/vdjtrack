@@ -1,0 +1,54 @@
+\documentclass[12pt]{article}
+\usepackage[margin=0.5in]{geometry}
+\usepackage{graphicx}
+\usepackage{bbold}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{commath}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage[makeroom]{cancel}
+
+\begin{document}
+
+\subsection{Estimating species population frequencies from sampled abundances}
+
+Let species $i$ have a population frequency $\rho_i$ and abundance $s_i$ in our sample of mass $S$. For each species we have
+
+\begin{equation}
+P(\rho|s, S) = \frac{P(s|\rho, S)}{P(s|S)}P(\rho|S)
+\end{equation}
+
+where $P(s|S)=f_s$ is the fraction of mass occupied by specii of size $s$ and $P(\rho|S) = P(\rho)$ is the unknown distribution of population frequencies. Using Poisson distribution with parameter $\lambda=\rho S$ to model $s$ one gets
+
+\begin{equation}
+P(\rho|s, S) = \frac{\lambda^s e^{-\lambda}}{s!}f_s^{-1}P(\rho)
+\end{equation}
+
+Assuming there are $n$ species and overall $N$ species in the sample one can model the probability to draw a species
+
+\begin{equation}
+p \sim Beta(\alpha, \beta)
+\end{equation}
+
+on the other hand, the probability to sample species that has population frequency $\rho$ is
+
+\begin{equation}
+p = 1 - e^{\rho S}
+\end{equation}
+
+Thus we have
+
+\begin{align}
+\rho &= -\frac{1}{S} \log 1-p_s \\
+p &\sim Beta(n_s, N - n_s)
+\end{align}
+
+where $\lambda_i = \rho_i S$. The fraction of sampled species of size $s$ is
+
+\begin{equation}
+p_s = \sum_i p_i P(s_i = s)
+\end{equation}
+
+\end{document}
