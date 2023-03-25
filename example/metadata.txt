@@ -1,0 +1,13 @@
+file.name	donor	time
+P1_0.txt.gz	P1	before
+P1_15.txt.gz	P1	after
+P2_0.txt.gz	P2	before
+P2_15.txt.gz	P2	after
+Q1_0.txt.gz	Q1	before
+Q1_15.txt.gz	Q1	after
+Q2_0.txt.gz	Q2	before
+Q2_15.txt.gz	Q2	after
+S1_0.txt.gz	S1	before
+S1_15.txt.gz	S1	after
+S2_0.txt.gz	S2	before
+S2_15.txt.gz	S2	after

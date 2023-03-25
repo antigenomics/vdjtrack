@@ -1,0 +1,150 @@
+---
+title: "Applying VDJtrack algorithm to Yellow Fever Virus vaccination data"
+author: "M.S."
+date: "2023-03-25"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(stringdist)
+```
+
+Load clonotype annotations, metadata and data from the Yellow Fever Vaccination 
+time course (0th day = before, 15th day = after)
+
+```{r message=FALSE}
+annot <- read_tsv("example/annotations.txt") 
+meta <- read_tsv("example/metadata.txt")
+data <- meta %>%
+  group_by(donor, time) %>%
+  group_modify(~ read_tsv(paste0("example/", .x$file.name)))
+```
+
+A little trick - annotate with 1 amino acid substitution, expand the annotation
+
+```{r}
+#Compute distances between strings:
+get_distances <- function(aa.seq.1, aa.seq.2, threshold = 1,
+                          method = "hamming", ...) {
+  stringdistmatrix(unique(aa.seq.1), unique(aa.seq.2), 
+                   method = method,
+                   useNames = T, ...) %>%
+    melt %>%
+    filter(value <= threshold) %>%
+    rename(aa.seq = Var1, aa.seq.db = Var2, dist = value) %>%
+    mutate(aa.seq = as.character(aa.seq), aa.seq.db = as.character(aa.seq.db))
+}
+
+#An optimized routine that splits by length and processes in chunks(hamming only):
+get_1mm_pairs <- function(aa.seq, aa.seq.db, chunks = 64) {
+  d <- tibble(aa.seq = unique(aa.seq)) %>%
+    mutate(len = nchar(aa.seq),
+           chunk.id = rep(1:chunks, length.out = length(unique(aa.seq))))
+  
+  db <- tibble(aa.seq.db = unique(aa.seq.db)) %>%
+    mutate(len.db = nchar(aa.seq.db)) 
+  
+  d %>%
+    group_by(chunk.id, len) %>%
+    group_modify(~ get_distances(.x$aa.seq, db %>% 
+                                   filter(len.db == .y$len) %>%
+                                   .$aa.seq.db))
+}
+
+annot <- annot %>%
+  group_by(group) %>%
+  group_modify(~get_1mm_pairs(data$cdr3aa, .x$cdr3aa) %>%
+                 rename(cdr3aa = aa.seq) %>%
+                 select(cdr3aa)) %>%
+  ungroup %>%
+  select(-chunk.id, -len) 
+```
+
+Annotate data by size (singleton/doubleton/...) and according to Yellow Fever 
+Virus antigen specificity
+
+```{r}
+data <- data %>%
+  mutate(quantile = case_when(
+    count == 1 ~ "singleton",
+    count == 2 ~ "doubleton",
+    .default = "3+"
+  )) %>%
+  mutate(quantile = factor(quantile, levels = c("singleton",
+                                                "doubleton",
+                                                "3+"))) %>%
+  left_join(annot) %>%
+  mutate(group = ifelse(is.na(group), "unknown", group)) %>%
+  ungroup
+```
+
+Identify clonotypes that appeared (spawned) in `after` dataset but were 
+absent in `before` time point
+
+```{r}
+# count is the frequency in the 'after' dataset
+data %>%
+  filter(time == "before") %>%
+  select(-time) %>%
+  left_join(data %>%
+              filter(time == "after") %>%
+              select(-time, -count, -quantile, -group) %>%
+              mutate(spawned = T)) %>%
+  mutate(spawned = !is.na(spawned)) -> data.m
+```
+
+Calculate sample sizes and compute sampling statistics
+
+```{r}
+data.s0 <- data %>%
+  group_by(donor, time, group) %>%
+  summarise(diversity = n()) %>%
+  dcast(donor + group ~ time) %>%
+  rename(div.after = after, div.before = before)
+
+data.s <- data.m %>%
+  group_by(donor, group, quantile) %>%
+  summarise(spawned = sum(spawned), total = n())
+
+data.vdjtrack <- inner_join(data.s, data.s0)
+
+data.vdjtrack
+```
+
+Plot results
+
+```{r}
+data.vdjtrack %>%
+  ggplot(aes(x = div.after / div.before, 
+             y = spawned / total,
+             color = quantile)) +
+  geom_text(aes(label = donor)) +
+  geom_smooth(method = "lm") +
+  scale_x_log10("Diversity after / before") +
+  ylab("Fraction spawned") +
+  scale_color_brewer(palette = "Set1") +
+  facet_wrap(~group) +
+  theme_classic() +
+  theme(aspect = 1, legend.position = "bottom")
+```
+
+Compute statistics
+
+```{r}
+mdl <- lm(spawned.frac ~ quantile + group + div.ratio,
+          data = data.vdjtrack %>%
+            mutate(div.ratio = log(div.after / div.before),
+                   spawned.frac = log(spawned / total)
+            ))
+summary(mdl)
+```
+
+```{r}
+#END
+```
