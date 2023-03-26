@@ -1,0 +1,50 @@
+\documentclass[12pt]{article}
+\usepackage[margin=0.5in]{geometry}
+\usepackage{graphicx}
+\usepackage{bbold}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{commath}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage[makeroom]{cancel}
+
+\begin{document}
+
+\subsection{A naive sampling model}
+
+Assume we have a set of $n$ clonotypes having population abundance $\rho$ in a sample containing $N$ clonotypes in total. Upon re-sampling we detect $m$ clonotypes in sample of size $M$. We can model sampling rate $r$ and clonotype incidence as 
+
+\begin{align}
+r &\sim Beta(m, n - m) \\
+n &\sim Binom(\rho, N) \\
+m &\sim Binom(\rho, M)
+\end{align}
+
+We can link clonotype size $s$ and population frequency as
+
+\begin{equation}
+s \sim Poiss(\rho N)
+\end{equation}
+
+The probability to re-sample a clonotype from the set is
+
+\begin{equation}
+r = 1 - e^{\rho M}
+\end{equation}
+
+Averaging according to our uncertainity in $\rho$ we have
+
+\begin{equation}
+\hat{r} = 1 - \int_0^1 e^{\rho M} P(\rho) d\rho
+\end{equation}
+
+If there is no uncertainty
+
+\begin{equation}
+\log\left(1 - \hat{r}\right) \approx s \frac{M}{N}
+\end{equation}
+
+
+\end{document}
