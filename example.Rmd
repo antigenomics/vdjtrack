@@ -16,7 +16,9 @@ library(stringdist)
 ```
 
 Load clonotype annotations, metadata and data from the Yellow Fever Vaccination 
-time course (0th day = before, 15th day = after)
+time course (0th day = before, 15th day = after). You can substitute the underlying data with your dataset and clonotype annotations with annotations for 
+your clonotypes of interest. If you have several groups of samples, you can 
+alternatively use code for DLI/non-DLI comparison in the ``code/`` folder.
 
 ```{r message=FALSE}
 annot <- read_tsv("example/annotations.txt") 
@@ -26,7 +28,7 @@ data <- meta %>%
   group_modify(~ read_tsv(paste0("example/", .x$file.name)))
 ```
 
-A little trick - annotate with 1 amino acid substitution, expand the annotation
+A little trick - annotate with 1 aminoacid substitution, expand the annotation
 
 ```{r}
 #Compute distances between strings:
