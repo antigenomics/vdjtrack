@@ -1,0 +1,164 @@
+---
+title: "T-cell survival: 3 year dynamic and YF data"
+author: "Anastasia Pavlova"
+date: '2022-10-12'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(cowplot)
+```
+
+```{r}
+meta.a <- read_tsv("../data/aging_3year/metadata.txt")
+meta.a
+```
+
+```{r}
+data.a <- meta.a %>%
+  group_by(donor, age) %>%
+  group_modify(~read_tsv(paste0("../data/aging_3year/", .x$file.name))) %>%
+  ungroup %>%
+  mutate(tcrkey = paste(v, cdr3nt)) %>%
+  group_by(donor, age, tcrkey) %>%
+  summarise(count = sum(count)) %>%
+  ungroup
+```
+
+```{r}
+data.a.m <- data.a %>%
+  filter(age %in% c(27, 47)) %>%
+  left_join(data.a %>% 
+          filter(age %in% c(30, 50)) %>%
+          select(donor, tcrkey) %>%
+          unique %>%
+          mutate(overlapping = T)) %>%
+  mutate(overlapping = !is.na(overlapping))
+```
+
+```{r}
+data.a.s <- data.a.m %>%
+  mutate(count = pmin(10, count)) %>%
+  group_by(sample = paste0(donor, " ", age, "yo"), count) %>%
+  summarise(alpha = sum(overlapping), 
+            beta = sum(!overlapping))
+```
+
+```{r}
+p1 <- data.a.s %>%
+  ggplot(aes(x = count, y = alpha / beta,
+             color = sample)) +
+  geom_point(aes(x = as.factor(
+    ifelse(count > 9, "10+", count) %>%
+      fct_reorder(count)
+    ))) +
+  geom_smooth(method = "lm") +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_log10("Re-capture probability") +
+  xlab("Count in original sample") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+p1
+```
+
+```{r message=FALSE}
+meta.v <- read_tsv("../data/yellow_fever_vac/metadata.txt") %>%
+  filter(time %in% c(-1 , 0))
+
+data.v <- meta.v %>%
+  filter(replica == "F1") %>%
+  group_by(donor, time, replica) %>%
+  group_modify(~ read_tsv(paste0("../data/yellow_fever_vac/", .x$file.name))) %>%
+  mutate(cdr3 = `N. Seq. CDR3`,
+         v = str_split_fixed(`All V hits`, fixed("*"), 2)[,1],
+         count = `Clone count`) %>%
+  group_by(donor, time, replica, cdr3, v) %>%
+  summarise(count = sum(count)) %>%
+  ungroup
+```
+
+```{r}
+data.v <- data.v %>%
+  mutate(quantile = case_when(
+    count == 1 ~ "Singleton",
+    count == 2 ~ "Doubleton",
+    count == 3 ~ "Tripleton",
+    T ~ "Large"
+  )) %>%
+  mutate(quantile = factor(quantile,
+                           c("Singleton", 
+                             "Doubleton", "Tripleton",
+                             "Large"))) %>%
+  select(-count)
+  
+data.v.m <- left_join(
+  data.v %>%
+    filter(time == -1)  %>%
+    select(-time, -replica),
+  data.v %>%
+    filter(time == 0) %>%
+    mutate(found = T) %>%
+    select(-quantile, -time, -replica),
+  by = c("donor", "cdr3", "v")
+) %>%
+  mutate(found = !is.na(found))
+```
+
+```{r}
+data.v.s <- data.v.m %>%
+  group_by(donor, quantile) %>%
+  summarise(alpha = sum(found),
+            beta = sum(!found)) %>%
+  left_join(data.v %>%
+              filter(time == -1) %>%
+              group_by(donor) %>%
+              summarise(clonotypes.pre = length(unique(paste(v, cdr3)))))%>%
+  left_join(data.v %>%
+              filter(time == 0) %>%
+              group_by(donor) %>%
+              summarise(clonotypes.post = length(unique(paste(v, cdr3)))))
+```
+
+```{r}
+p2 <- data.v.s %>%
+  ggplot(aes(x = clonotypes.post / clonotypes.pre,
+             y = alpha / (alpha + beta), 
+             group = quantile, 
+             color = quantile)) +
+  geom_smooth(method = "lm", aes(), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = donor), size = 2, color = "white") +
+  scale_x_log10("Clones at day 0 / clones at day -7") + 
+  scale_y_log10("Capture probability") +
+  scale_color_brewer("", palette = "Set2") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+p2
+```
+
+```{r}
+mdl <- lm(LogRecaptureProb ~ Quantile + LogDiversityRatio,
+          data.v.s %>%
+            mutate(LogRecaptureProb = log10(alpha / (alpha + beta)),
+                   LogDiversityRatio = log10(clonotypes.post / clonotypes.pre),
+                   Quantile = quantile))
+summary(mdl)
+```
+
+```{r}
+plot_grid(p1, p2,
+          labels = c("A", "B"),
+          label_size = 10) -> fig3
+fig3
+ggsave("fig3.pdf", fig3)
+```
+
+```{r}
+```

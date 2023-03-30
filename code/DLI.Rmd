@@ -1,8 +1,8 @@
 ---
 title: "T-cell survival: DLI"
 output:
-  html_document: default
   pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -142,7 +142,7 @@ p4 <- data.s %>%
   filter(quantile.don != "Novel", !DLI) %>%
   ggplot(aes(x = total.rec / total.don,
              y = alpha / (alpha + beta), 
-             group = paste(quantile.don), 
+             group = quantile.don, 
              color = quantile.don)) +
   geom_smooth(method = "lm", aes(), size = 1) +
   geom_point(size = 5) +
