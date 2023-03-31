@@ -1,0 +1,105 @@
+---
+title: 'T-cell repertoire re-capture in vaccination time-course'
+date: '2022-10-24'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(stringr)
+library(stringdist)
+```
+
+```{r message = FALSE}
+meta <- read_tsv("../data/yellow_fever_vac/metadata.txt") %>%
+  filter(replica == "F1") %>%
+  select(-replica)
+
+data <- meta %>%
+  group_by(donor, time) %>%
+  group_modify(~read_tsv(paste0("../data/yellow_fever_vac/",
+                                .x$file.name)))
+```
+
+```{r}
+data.1 <- data %>%
+  mutate(count = `Clone count`,
+         cdr3nt = `N. Seq. CDR3`,
+         cdr3aa = `AA. Seq. CDR3`,
+         v = str_split_fixed(`All V hits`, fixed("*"), 2)[,1]) %>%
+  filter(startsWith(`AA. Seq. CDR3`, "C"),
+         endsWith(`AA. Seq. CDR3`, "F"),
+         !grepl("[*_]", cdr3aa)) %>%
+  group_by(donor, time, cdr3nt, cdr3aa, v) %>%
+  summarise(count = sum(count)) %>% ungroup
+```
+
+```{r}
+cdr3post <- data.1 %>%
+  filter(time != -1) %>%
+  .$cdr3aa %>% unique
+cdr3pre <- data.1 %>%
+  filter(time == -1) %>%
+  .$cdr3aa %>% unique
+cdr3emerge <- setdiff(cdr3post,
+                      cdr3pre)
+cdr3emerge <- intersect(cdr3emerge, 
+                        cdr3post)
+```
+
+```{r}
+annot <- read_tsv("../example/annotations.txt")
+
+#Compute distances between strings:
+get_distances <- function(aa.seq.1, aa.seq.2, threshold = 1,
+                          method = "hamming", ...) {
+  stringdistmatrix(unique(aa.seq.1), unique(aa.seq.2), 
+                   method = method,
+                   useNames = T, ...) %>%
+    melt %>%
+    filter(value <= threshold) %>%
+    rename(aa.seq = Var1, aa.seq.db = Var2, dist = value) %>%
+    mutate(aa.seq = as.character(aa.seq), aa.seq.db = as.character(aa.seq.db))
+}
+
+#An optimized routine that splits by length and processes in chunks(hamming only):
+get_1mm_pairs <- function(aa.seq, aa.seq.db, chunks = 64) {
+  if(length(aa.seq) == 0 | length(aa.seq.db) == 0) {
+    return(tibble())
+  }
+  d <- tibble(aa.seq = unique(aa.seq)) %>%
+    mutate(len = nchar(aa.seq),
+           chunk.id = rep(1:chunks, length.out = length(unique(aa.seq))))
+  
+  db <- tibble(aa.seq.db = unique(aa.seq.db)) %>%
+    mutate(len.db = nchar(aa.seq.db)) 
+  
+  d %>%
+    group_by(chunk.id, len) %>%
+    group_modify(~ get_distances(.x$aa.seq, db %>% 
+                                   filter(len.db == .y$len) %>%
+                                   .$aa.seq.db))
+}
+
+annot <- annot %>%
+  group_by(group) %>%
+  group_modify(~get_1mm_pairs(data.1$cdr3aa, .x$cdr3aa) %>%
+                 rename(cdr3aa = aa.seq) %>%
+                 select(cdr3aa)) %>%
+  ungroup %>%
+  select(-chunk.id, -len) 
+```
+
+```{r}
+data.2 <- data.1 %>%
+  mutate(emerging = cdr3aa %in% cdr3emerge,
+         yfspec = cdr3aa %in% annot$cdr3aa)
+```
+
+```{r}
+```
