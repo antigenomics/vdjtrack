@@ -157,7 +157,7 @@ plot_grid(p1, p2,
           labels = c("A", "B"),
           label_size = 10) -> fig3
 fig3
-ggsave("fig3.pdf", fig3)
+ggsave("../figures/fig3.pdf", fig3)
 ```
 
 ```{r}
