@@ -19,7 +19,7 @@ Load data
 
 ```{r message = FALSE}
 meta <- read_tsv("../data/yellow_fever_vac/metadata.txt") %>%
-  filter(replica == "F1") %>%
+  filter(replica == "F1", time != -1) %>%
   select(-replica)
 
 data <- meta %>%
@@ -31,7 +31,7 @@ data <- meta %>%
 Some processing
 
 ```{r}
-data.1 <- data %>%
+data <- data %>%
   mutate(count = `Clone count`,
          cdr3nt = `N. Seq. CDR3`,
          cdr3aa = `AA. Seq. CDR3`,
@@ -43,36 +43,62 @@ data.1 <- data %>%
   summarise(count = sum(count)) %>% ungroup
 ```
 
-Find emerging clonotypes based on time point '-1' not used in the analysis
+Load annotations - A02LLW-specific clonotypes, mark them and clonotypes that differ by 1 mm
+in CDR3 amino acid sequences in the dataset as specific
 
 ```{r}
-cdr3post <- data.1 %>%
-  filter(time != -1) %>%
-  .$cdr3aa %>% unique
-cdr3pre <- data.1 %>%
-  filter(time == -1) %>%
-  .$cdr3aa %>% unique
-cdr3emerge <- setdiff(cdr3pre,
-                      cdr3post)
-cdr3emerge <- intersect(cdr3emerge, 
-                        cdr3post)
+annot <- read_tsv("../example/annotations.txt")
 
-data.2 <- data.1 %>%
-  mutate(emerging = cdr3aa %in% cdr3emerge)
+#Compute distances between strings:
+get_distances <- function(aa.seq.1, aa.seq.2, threshold = 1,
+                          method = "hamming", ...) {
+  stringdistmatrix(unique(aa.seq.1), unique(aa.seq.2), 
+                   method = method,
+                   useNames = T, ...) %>%
+    melt %>%
+    filter(value <= threshold) %>%
+    rename(aa.seq = Var1, aa.seq.db = Var2, dist = value) %>%
+    mutate(aa.seq = as.character(aa.seq), aa.seq.db = as.character(aa.seq.db))
+}
 
-data.3 <- data.2 %>%
-  mutate(tcrkey = paste(v, cdr3nt)) %>%
-  select(-cdr3nt, -cdr3aa, -v) %>%
-  filter(time != -1)
+#An optimized routine that splits by length and processes in chunks(hamming only):
+get_1mm_pairs <- function(aa.seq, aa.seq.db, chunks = 64) {
+  d <- tibble(aa.seq = unique(aa.seq)) %>%
+    mutate(len = nchar(aa.seq),
+           chunk.id = rep(1:chunks, length.out = length(unique(aa.seq))))
+  
+  db <- tibble(aa.seq.db = unique(aa.seq.db)) %>%
+    mutate(len.db = nchar(aa.seq.db)) 
+  
+  d %>%
+    group_by(chunk.id, len) %>%
+    group_modify(~ get_distances(.x$aa.seq, db %>% 
+                                   filter(len.db == .y$len) %>%
+                                   .$aa.seq.db)) %>%
+    ungroup %>%
+    select(-chunk.id, -len) 
+}
+
+annot <- get_1mm_pairs(data$cdr3aa, annot$cdr3aa) %>%
+  rename(cdr3aa = aa.seq) %>%
+  select(cdr3aa) %>%
+  mutate(specificity = "A02LLW")
+
+data <- data %>%
+  mutate(specific = cdr3aa %in% annot$cdr3aa)
 ```
 
 Merge datasets to check sharing between 'before' and 'after' time points
 
 ```{r}
-data.m <- data.3 %>%
-  group_by(donor, emerging, time) %>%
+data.1 <- data %>%
+  mutate(tcrkey = paste(v, cdr3nt)) %>%
+  select(-cdr3nt, -cdr3aa, -v)
+
+data.m <- data.1 %>%
+  group_by(donor, emerging, specific, time) %>%
   group_modify(~left_join(.x,
-                          data.3 %>%
+                          data.1 %>%
                             mutate(time.next = time) %>%
                             select(-time) %>%
                             filter(.y$time < time.next) %>%
@@ -98,12 +124,12 @@ Summarize data
 
 ```{r}
 data.s <- data.m %>%
-  group_by(time, time.next, donor, quantile, emerging) %>%
+  group_by(time, time.next, donor, quantile, specific) %>%
   summarise(alpha = sum(found), beta = sum(!found)) %>%
-  left_join(data.3 %>% 
+  left_join(data.1 %>% 
               group_by(donor, time) %>%
               summarise(total.time = length(unique(tcrkey)))) %>%
-  left_join(data.3 %>% 
+  left_join(data.1 %>% 
               mutate(time.next = time) %>%
               select(-time) %>%
               group_by(donor, time.next) %>%
@@ -111,7 +137,7 @@ data.s <- data.m %>%
   ungroup
 
 data.s <- data.s %>%
-  group_by(time, donor, quantile, emerging) %>%
+  group_by(time, donor, quantile, specific) %>%
   mutate(beta = sum(beta)) %>%
   filter(!is.na(time.next)) %>%
   ungroup
@@ -123,7 +149,7 @@ data.s.1 <- data.s %>%
   mutate(logRecaptureProb = log10(alpha / (alpha + beta)),
          logSampleSizeRation = log10(total.time.next / total.time))
 
-mdl <- lm(logRecaptureProb ~ quantile + logSampleSizeRation + emerging, 
+mdl <- lm(logRecaptureProb ~ quantile + logSampleSizeRation + specific, 
           data.s.1 %>% filter(time == 0, time.next == 15))
 mdl
 summary(mdl)
@@ -133,6 +159,7 @@ Plot figure
 
 ```{r}
 p1 <- data.s.1 %>%
+  mutate(specific = ifelse(specific, "A02LLW", "Other")) %>%
   mutate(time = paste("from", time) %>%
            factor(levels = c("from 0", "from 7", "from 15")),
          time.next = paste("to", time.next) %>%
@@ -140,13 +167,15 @@ p1 <- data.s.1 %>%
   ggplot(aes(x = total.time.next / total.time, 
              y = alpha / (alpha + beta), 
              color = quantile,
-             shape = emerging,
-             linetype = emerging)) +
+             shape = specific,
+             linetype = specific)) +
   geom_smooth(method = "lm", se = F) +
   geom_point() +
-  scale_color_brewer(palette = "Spectral") +
+  scale_color_brewer("", palette = "Spectral") +
   scale_x_log10("Next time point to previous time point diversity ratio") +
   scale_y_log10("Re-capture probability") +
+  scale_linetype_manual(values = c("solid", "dotted")) +
+  scale_shape_manual(values = c(16, 1)) +
   facet_grid(time ~ time.next) +
   theme_classic() +
   theme(legend.position = "bottom")
@@ -158,4 +187,5 @@ dev.off()
 ```
 
 ```{r}
+
 ```
