@@ -105,6 +105,7 @@ p2 <- data.m %>%
   theme(legend.position = "bottom")
 p2
 ```
+
 ```{r}
 alpha.prior <- 1
 beta.prior <- 1

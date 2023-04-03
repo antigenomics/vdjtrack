@@ -1,7 +1,9 @@
 ---
-title: 'T-cell repertoire re-capture in vaccination time-course'
+title: "T-cell repertoire re-capture in vaccination time-course"
 date: '2022-10-24'
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -11,6 +13,7 @@ library(tidyverse)
 library(ggplot2)
 library(reshape2)
 library(stringr)
+library(ggridges)
 library(stringdist)
 library(data.table)
 ```
@@ -183,6 +186,37 @@ p1
 
 pdf("../figures/fig4a.pdf")
 p1
+dev.off()
+```
+
+```{r}
+data.b <- data.s.1 %>%
+  filter(time == 0, time.next == 15) %>%
+  merge(tibble(p = 0:10000/10000)) %>%
+  group_by(donor, specific, quantile) %>%
+  mutate(Pbeta = dbeta(p, alpha, beta)) %>%
+  ungroup
+
+p2 <- data.b %>%
+  filter(Pbeta > 1e-4) %>%
+  mutate(specificity = ifelse(specific, "A02_LLW", "Unknown")) %>%
+  group_by(donor, specific, quantile) %>%
+  mutate(height = Pbeta / max(Pbeta)) %>%
+  ggplot(aes(x = p, 
+             y = height,
+             group = paste(quantile, specificity),
+             linetype = specificity,
+             color = quantile)) +
+  geom_line() +
+  scale_color_brewer("", palette = "Spectral") +
+  scale_x_log10("Capture probability") + ylab("Pbeta") +
+  facet_wrap(~donor) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+p2
+
+pdf("../figures/fig4b.pdf")
+p2
 dev.off()
 ```
 

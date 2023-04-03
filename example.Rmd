@@ -76,7 +76,7 @@ data <- data %>%
   mutate(quantile = case_when(
     count == 1 ~ "singleton",
     count == 2 ~ "doubleton",
-    .default = "3+"
+    T ~ "3+"
   )) %>%
   mutate(quantile = factor(quantile, levels = c("singleton",
                                                 "doubleton",
