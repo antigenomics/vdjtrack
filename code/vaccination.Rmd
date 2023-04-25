@@ -12,17 +12,20 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(ggplot2)
 library(reshape2)
+library(forcats)
 library(stringr)
 library(ggridges)
 library(stringdist)
 library(data.table)
+library(cowplot)
+library(broom)
 ```
 
 Load data
 
 ```{r message = FALSE}
 meta <- read_tsv("../data/yellow_fever_vac/metadata.txt") %>%
-  filter(replica == "F1", time != -1) %>%
+  filter(replica == "F1") %>%
   select(-replica)
 
 data <- meta %>%
@@ -35,21 +38,49 @@ Some processing
 
 ```{r}
 data <- data %>%
-  mutate(count = `Clone count`,
-         cdr3nt = `N. Seq. CDR3`,
-         cdr3aa = `AA. Seq. CDR3`,
-         v = str_split_fixed(`All V hits`, fixed("*"), 2)[,1]) %>%
-  filter(startsWith(`AA. Seq. CDR3`, "C"),
-         endsWith(`AA. Seq. CDR3`, "F"),
-         !grepl("[*_]", cdr3aa)) %>%
   group_by(donor, time, cdr3nt, cdr3aa, v) %>%
-  summarise(count = sum(count)) %>% ungroup
+  summarise(count = sum(count)) %>% 
+  ungroup
+```
+
+```{r}
+data.div <- data %>%
+  group_by(donor, time) %>%
+  summarise(div = length(unique(paste(cdr3nt, v))))
+```
+
+Merge datasets to check sharing between 'before' and 'after' time points
+
+```{r}
+data.m <- data %>%
+  group_by(donor, time) %>%
+  group_modify(~left_join(.x,
+                          data %>%
+                            mutate(time.next = time) %>%
+                            select(-time) %>%
+                            filter(.y$time < time.next) %>%
+                            mutate(found = T) %>%
+                            select(v, cdr3nt, cdr3aa, time.next, found)))
+
+data.m <- data.m %>%
+  mutate(found = !is.na(found)) %>%
+  mutate(quantile = case_when(
+    count == 1 ~ "Singleton",
+    count == 2 ~ "Doubleton",
+    count == 3 ~ "Tripleton",
+    T ~ "Large")) %>%
+  mutate(quantile = factor(
+    quantile,
+    c("Singleton", 
+      "Doubleton",
+      "Tripleton",
+      "Large")))
 ```
 
 Load annotations - A02LLW-specific clonotypes, mark them and clonotypes that differ by 1 mm
 in CDR3 amino acid sequences in the dataset as specific
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 annot <- read_tsv("../example/annotations.txt")
 
 #Compute distances between strings:
@@ -86,138 +117,114 @@ annot <- get_1mm_pairs(data$cdr3aa, annot$cdr3aa) %>%
   rename(cdr3aa = aa.seq) %>%
   select(cdr3aa) %>%
   mutate(specificity = "A02LLW")
-
-data <- data %>%
-  mutate(specific = cdr3aa %in% annot$cdr3aa)
 ```
 
-Merge datasets to check sharing between 'before' and 'after' time points
+For annotations - capture probability at day 15 compared to day 0
 
 ```{r}
-data.1 <- data %>%
-  mutate(tcrkey = paste(v, cdr3nt)) %>%
-  select(-cdr3nt, -cdr3aa, -v)
-
-data.m <- data.1 %>%
-  group_by(donor, emerging, specific, time) %>%
-  group_modify(~left_join(.x,
-                          data.1 %>%
-                            mutate(time.next = time) %>%
-                            select(-time) %>%
-                            filter(.y$time < time.next) %>%
-                            mutate(found = T) %>%
-                            select(tcrkey, time.next, found)))
-
-data.m <- data.m %>%
-  mutate(found = !is.na(found)) %>%
-  mutate(quantile = case_when(
-    count == 1 ~ "Singleton",
-    count == 2 ~ "Doubleton",
-    count == 3 ~ "Tripleton",
-    T ~ "Large")) %>%
-  mutate(quantile = factor(
-    quantile,
-    c("Singleton", 
-      "Doubleton", 
-      "Tripleton",
-      "Large")))
-```
-
-Summarize data
-
-```{r}
-data.s <- data.m %>%
+data.s.s <- data.m %>%
+  mutate(specific = cdr3aa %in% annot$cdr3aa) %>%
   group_by(time, time.next, donor, quantile, specific) %>%
   summarise(alpha = sum(found), beta = sum(!found)) %>%
-  left_join(data.1 %>% 
-              group_by(donor, time) %>%
-              summarise(total.time = length(unique(tcrkey)))) %>%
-  left_join(data.1 %>% 
-              mutate(time.next = time) %>%
-              select(-time) %>%
-              group_by(donor, time.next) %>%
-              summarise(total.time.next = length(unique(tcrkey)))) %>%
-  ungroup
-
-data.s <- data.s %>%
-  group_by(time, donor, quantile, specific) %>%
+  group_by(time, donor, quantile, specific) %>% # append data for missing clonotypes
   mutate(beta = sum(beta)) %>%
   filter(!is.na(time.next)) %>%
   ungroup
-```
-Build linear model
 
-```{r}
-data.s.1 <- data.s %>%
-  mutate(logRecaptureProb = log10(alpha / (alpha + beta)),
-         logSampleSizeRation = log10(total.time.next / total.time))
-
-mdl <- lm(logRecaptureProb ~ quantile + logSampleSizeRation + specific, 
-          data.s.1 %>% filter(time == 0, time.next == 15))
-mdl
-summary(mdl)
-```
-
-Plot figure
-
-```{r}
-p1 <- data.s.1 %>%
-  mutate(specific = ifelse(specific, "A02LLW", "Other")) %>%
-  mutate(time = paste("from", time) %>%
-           factor(levels = c("from 0", "from 7", "from 15")),
-         time.next = paste("to", time.next) %>%
-           factor(levels = c("to 7", "to 15", "to 45"))) %>%
-  ggplot(aes(x = total.time.next / total.time, 
-             y = alpha / (alpha + beta), 
-             color = quantile,
-             shape = specific,
-             linetype = specific)) +
-  geom_smooth(method = "lm", se = F) +
-  geom_point() +
-  scale_color_brewer("", palette = "Spectral") +
-  scale_x_log10("Next time point to previous time point diversity ratio") +
-  scale_y_log10("Re-capture probability") +
-  scale_linetype_manual(values = c("solid", "dotted")) +
-  scale_shape_manual(values = c(16, 1)) +
-  facet_grid(time ~ time.next) +
-  theme_classic() +
-  theme(legend.position = "bottom")
-p1
-
-pdf("../figures/fig4a.pdf")
-p1
-dev.off()
-```
-
-```{r}
-data.b <- data.s.1 %>%
-  filter(time == 0, time.next == 15) %>%
+data.b <- data.s.s %>%
+  filter(time == 15, time.next == 45) %>%
   merge(tibble(p = 0:10000/10000)) %>%
+  filter(p > 0.0001) %>%
   group_by(donor, specific, quantile) %>%
   mutate(Pbeta = dbeta(p, alpha, beta)) %>%
   ungroup
 
-p2 <- data.b %>%
-  filter(Pbeta > 1e-4) %>%
-  mutate(specificity = ifelse(specific, "A02_LLW", "Unknown")) %>%
+p1 <- data.b %>%
+  filter(Pbeta > 1e-5) %>%
+  mutate(specificity = ifelse(specific, "A02_LLW", "Unknown"),
+         time = as.character(time)) %>%
   group_by(donor, specific, quantile) %>%
   mutate(height = Pbeta / max(Pbeta)) %>%
   ggplot(aes(x = p, 
              y = height,
-             group = paste(quantile, specificity),
+             group = paste(specificity, quantile, donor, time),
              linetype = specificity,
              color = quantile)) +
   geom_line() +
-  scale_color_brewer("", palette = "Spectral") +
-  scale_x_log10("Capture probability") + ylab("Pbeta") +
-  facet_wrap(~donor) +
+  scale_color_brewer("Quantile", palette = "Set1") +
+  scale_x_log10("Capture probability") +
+  scale_linetype_manual("Specificity", values = c("solid", "dotted")) +
+  ylab("Pbeta") +
+  facet_wrap(.~donor, ncol = 2) +
   theme_classic() +
-  theme(legend.position = "bottom")
-p2
+  theme(legend.position = "bottom", 
+        legend.box="vertical")
+p1
+```
 
-pdf("../figures/fig4b.pdf")
+For emerging clonotypes - found in 7 but absent in 0
+
+```{r}
+cdrs7 <- data %>% filter(time == 7) %>% .$cdr3aa %>% unique
+cdrs0 <- data %>% filter(time == 0) %>% .$cdr3aa %>% unique
+cdrs.emerging <- setdiff(cdrs7, cdrs0)
+```
+
+```{r}
+data.s.e <- data.m %>%
+  mutate(emerging = cdr3aa %in% cdrs.emerging) %>%
+  group_by(time, time.next, donor, quantile, emerging) %>%
+  summarise(alpha = sum(found), beta = sum(!found)) %>%
+  group_by(time, donor, quantile, emerging) %>% # append data for missing clonotypes
+  mutate(beta = sum(beta)) %>%
+  filter(!is.na(time.next)) %>%
+  ungroup %>%
+  left_join(data.div) %>%
+  left_join(data.div %>%
+              rename(time.next = time, div.next = div))
+```
+
+```{r}
+p2 <- data.s.e %>%
+  filter(time == 15, time.next == 45) %>%
+  mutate(alpha = alpha + 1, beta = beta + 1) %>%
+  mutate(p = alpha / (alpha + beta),
+         sdp = sqrt(alpha * beta / (alpha + beta) ^ 2 / (alpha + beta + 1))) %>%
+  ggplot(aes(x = donor %>% fct_reorder(p), 
+             y = p,
+             linetype = emerging,
+             shape = emerging,
+             color = quantile)) +
+  geom_point(size = 1) +
+  geom_errorbar(aes(ymin = p - 6 * sdp, ymax = p + 6 * sdp), 
+                linetype = "solid", width = 0.2) +
+  geom_line(aes(group = paste(emerging, quantile))) +
+  scale_y_log10("Capture probability") +
+  xlab("Donor") +
+  scale_linetype_manual("Emerging", values = c("dotted", "solid")) +
+  scale_color_brewer("Quantile", palette = "Set1") +
+  scale_shape_manual("Emerging", values = c(1, 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom", legend.box="vertical")
 p2
-dev.off()
+```
+
+```{r fig.width=6, fig.height=4}
+plot_grid(p1, p2,
+          labels = c("A", "B"),
+          label_size = 10) -> fig4
+fig4
+ggsave("../figures/fig4.pdf", fig4)
+```
+
+```{r}
+data.s.e %>%
+  filter(time == 15, time.next == 45) %>%
+  mutate(logP = log(alpha / (alpha + beta))) %>%
+  arrange(donor) %>%
+  group_by(quantile) %>%
+  group_modify(~ t.test(.x$logP[which(!.x$emerging)], .x$logP[which(.x$emerging)],
+                        paired = T) %>% tidy)
 ```
 
 ```{r}
