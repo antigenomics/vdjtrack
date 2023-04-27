@@ -1,6 +1,5 @@
 ---
 title: "T-cell survival: 3 year dynamic and YF data"
-author: "Anastasia Pavlova"
 date: '2022-10-12'
 output:
   pdf_document: default
@@ -60,7 +59,7 @@ p1 <- data.a.s %>%
       fct_reorder(count)
     ))) +
   geom_smooth(method = "lm") +
-  scale_color_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set2") +
   scale_y_log10("Re-capture probability") +
   xlab("Count in original sample") +
   theme_classic() +
@@ -137,7 +136,7 @@ p2 <- data.v.s %>%
   geom_text(aes(label = donor), size = 2, color = "white") +
   scale_x_log10("Clones at day 0 / clones at day -7") + 
   scale_y_log10("Capture probability") +
-  scale_color_brewer("", palette = "Set2") +
+  scale_color_brewer("", palette = "Set1") +
   theme_classic() +
   theme(legend.position = "bottom")
 p2

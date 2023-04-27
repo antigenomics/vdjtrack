@@ -14,6 +14,7 @@ library(ggplot2)
 library(reshape2)
 library(ggridges)
 library(broom)
+library(forcats)
 library(gridExtra)
 library(cowplot)
 ```
@@ -31,6 +32,13 @@ data <- tibble(fname = list.files("../data/hsct/")) %>%
   group_modify(~read_tsv(paste0("../data/hsct/", .y$fname))) %>%
   ungroup %>%
   select(-fname)
+```
+
+```{r}
+data %>%
+  filter(donor) %>%
+  select(sample.id, DLI) %>%
+  unique
 ```
 
 Merge data
@@ -85,8 +93,9 @@ p1 <- data.m %>%
   geom_bar(position = "dodge") +
   scale_y_log10("Clonotypes", limits = c(1, 1e6)) +
   xlab("") +
-  scale_fill_brewer("Size in Donor", 
-                    palette = "Set1") +
+  scale_fill_manual("Size in Donor", 
+                    values = c("grey", "#e41a1c", "#377eb8",
+                               "#4daf4a", "#984ea3")) +
   theme_classic() +
   theme(legend.position = "bottom")
 p1
@@ -99,8 +108,9 @@ p2 <- data.m %>%
   geom_bar(position = "dodge") +
   scale_y_log10("Clonotypes", limits = c(1, 1e6)) +
   xlab("") +
-  scale_fill_brewer("Size in Recepient", 
-                    palette = "Set1") +
+  scale_fill_manual("Size in Recepient", 
+                    values = c("grey", "#e41a1c", "#377eb8",
+                               "#4daf4a", "#984ea3")) +
   theme_classic() +
   theme(legend.position = "bottom")
 p2
@@ -132,7 +142,7 @@ p3 <- data.b %>%
   geom_ridgeline(color = NA, alpha = 0.9) + 
   scale_x_log10("Capture probability", 
                 limits = c(1e-4, 1e-1)) + ylab("Pbeta") +
-  scale_fill_brewer("", palette = "Set2") +
+  scale_fill_brewer("", palette = "Set1") +
   theme_classic() +
   theme(legend.position = "bottom")
 p3
@@ -150,7 +160,7 @@ p4 <- data.s %>%
   geom_text(aes(label = sample.id), size = 2, color = "white") +
   scale_x_log10("Clones in recepient / clones in donor") + 
   scale_y_log10("Capture probability") +
-  scale_color_brewer("", palette = "Set2") +
+  scale_color_brewer("", palette = "Set1") +
   theme_classic() +
   theme(legend.position = "bottom")
 p4
@@ -167,29 +177,115 @@ summary(mdl)
 
 tbl <- mdl %>%
   tidy %>%
-  mutate(estimate = signif(estimate, 1),
+  mutate(estimate = signif(estimate, 2),
          std.error = signif(std.error, 1),
-         p.value = signif(p.value, 1)) %>%
+         p.value = format(signif(p.value, digits = 1), scientific = T)) %>%
   select(term, estimate, std.error, p.value)
 
-p4 +
-  annotate(geom = "text", label = summary(mdl)$r.squared) +
-  annotation_custom(tableGrob(tbl, 
-                              rows = NULL,
-                              theme = ttheme_minimal(base_size=4,
-                                                     padding = unit(c(1, 1),
-                                                                    "mm"))),
-                    xmin=-0.5, ymin = -5.7) -> p5
-p5
+knitr::kable(tbl)
+
+# p4 +
+#   annotate(geom = "text", x = 0.1, y = 0.5,
+#            label = summary(mdl)$r.squared) +
+#   annotation_custom(tableGrob(tbl, 
+#                               rows = NULL,
+#                               theme = ttheme_minimal(base_size=4,
+#                                                      padding = unit(c(1, 1),
+#                                                                     "mm"))),
+#                     xmin=-0.5, ymin = -5.7) -> p5
+# p5
 ```
 
 ```{r fig.width=8, fig.height=6}
-plot_grid(p1, p2, p3, p5, 
+plot_grid(p1, p2, p3, p4, 
           labels = c("A", "B", "C", "D"),
           label_size = 10) -> fig2
 fig2
 ggsave("../figures/fig2.pdf", fig2)
 ```
 
+Check for difference between DLI and non-DLI using our model
+
 ```{r}
+mdl2 <- lm(LogRecaptureProb ~ Quantile + LogDiversityRatio + DLI,
+          data.s %>%
+            filter(quantile.don != "Novel") %>%
+            mutate(LogRecaptureProb = log10(alpha / (alpha + beta)),
+                   LogDiversityRatio = log10(total.rec / total.don),
+                   Quantile = quantile.don))
+summary(mdl2)
+
+tbl2 <- mdl2 %>%
+  tidy %>%
+  mutate(estimate = signif(estimate, 1),
+         std.error = signif(std.error, 1),
+         p.value = signif(p.value, 1)) %>%
+  select(term, estimate, std.error, p.value)
+
+knitr::kable(tbl2)
+
+p5 <- data.s %>%
+  filter(quantile.don != "Novel") %>%
+  ggplot(aes(x = total.rec / total.don,
+             y = alpha / (alpha + beta), 
+             group = quantile.don, 
+             color = quantile.don,
+             shape = DLI,
+             linetype = DLI)) +
+  geom_smooth(method = "lm",
+              aes(group = paste(quantile.don, DLI)), size = 1) +
+  geom_point(size = 5) +
+  geom_text(aes(label = sample.id), size = 2, color = "black") +
+  scale_x_log10("Clones in recepient / clones in donor") + 
+  scale_y_log10("Capture probability") +
+  scale_linetype_manual("DLI", values = c("dotted", "solid")) +
+  scale_color_brewer("Quantile", palette = "Set1") +
+  scale_shape_manual("DLI", values = c(1, 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom", legend.box="vertical")
+p5
+```
+
+Conventional way - correlation of log counts
+
+```{r}
+data.m %>%
+  filter(!is.na(count.don), !is.na(count.rec)) %>%
+  group_by(DLI, sample.id) %>%
+  group_modify(~cor.test(log10(.x$count.don), 
+                         log10(.x$count.rec)) %>% tidy) -> data.cor
+
+knitr::kable(data.cor)
+
+p6 <- data.m %>%
+  filter(!is.na(count.don), !is.na(count.rec)) %>%
+  ggplot(aes(x = count.don, y = count.rec)) +
+  #geom_point(alpha = 0.5, aes(color = quantile.don)) +
+  #geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(aes(color = DLI)) +
+  geom_text(data = data.cor %>%
+              mutate(text = paste0("R2=", round(estimate^2, 3),
+                                   "\nP=", signif(p.value,1))) %>%
+              select(sample.id, text),
+            aes(label = text, x = 1000, y = 100000)) +
+  geom_smooth(method = "lm", color = "black", linetype = "dotted") +
+  scale_x_log10("Count in donor", limits = c(1, 1e6)) +
+  scale_y_log10("Count in receptient", limits = c(1, 1e6), 
+                breaks = c(10, 1000, 100000)) +
+  scale_color_brewer(palette = "Set2", guide = F) +
+  facet_wrap(. ~ sample.id) +
+  theme_classic()
+p6
+```
+
+```{r fig.width=11, fig.height=6}
+plot_grid(p5, p6, 
+          labels = c("A", "B"),
+          rel_widths = c(1, 1.5)) -> fig5
+fig5
+ggsave("../figures/fig5.pdf", fig5)
+```
+
+```{r}
+aaaa
 ```
