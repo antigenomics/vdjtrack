@@ -75,9 +75,7 @@ data.v <- meta.v %>%
   filter(replica == "F1") %>%
   group_by(donor, time, replica) %>%
   group_modify(~ read_tsv(paste0("../data/yellow_fever_vac/", .x$file.name))) %>%
-  mutate(cdr3 = `N. Seq. CDR3`,
-         v = str_split_fixed(`All V hits`, fixed("*"), 2)[,1],
-         count = `Clone count`) %>%
+  mutate(cdr3 = cdr3nt) %>%
   group_by(donor, time, replica, cdr3, v) %>%
   summarise(count = sum(count)) %>%
   ungroup

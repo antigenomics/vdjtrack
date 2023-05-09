@@ -11,6 +11,7 @@ knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
 
 library(tidyverse)
 library(ggplot2)
+library(cowplot)
 ```
 
 Fetch metadata
@@ -100,10 +101,12 @@ data.pre.s %>%
   geom_point() +
   scale_color_brewer(palette = "Set1") +
   facet_grid(day ~ subset) +
-  scale_x_log10() + scale_y_log10() +
+  scale_x_log10("Clones in recepient / clones in donor") +
+  scale_y_log10("Capture probability") +
   theme_classic() +
-  theme(aspect = 1,
-        legend.position = "bottom")
+  theme(legend.position = "bottom") -> p1
+
+p1
 
 lm(f ~ day + subset + f0, data.pre.s %>%
   filter(day != "Missing") %>%
@@ -134,9 +137,18 @@ data.post.s %>%
   scale_y_log10("Chao diversity index") +
   xlab("day") +
   theme_classic() +
-  theme(aspect = 1)
+  theme(aspect = 1) -> p2
+
+p2
 
 t.test(I(log10(divChao)) ~ day, data.post.s)
+```
+
+```{r}
+plot_grid(p1, p2,
+          labels = c("A", "B")) -> fig6
+fig6
+ggsave("../figures/fig6.pdf", fig6)
 ```
 
 ```{r}
