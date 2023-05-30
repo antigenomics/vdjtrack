@@ -99,12 +99,14 @@ data.pre.s %>%
   geom_vline(linetype ="dashed", xintercept = 1) +
   geom_smooth(method = "lm", se = F) +
   geom_point() +
-  scale_color_brewer(palette = "Set1") +
+  scale_color_manual(guide = F,
+                     "Quantile", values = c("#d7191c", "#fdae61", "#2b83ba")) +
   facet_grid(day ~ subset) +
   scale_x_log10("Clones in recepient / clones in donor") +
   scale_y_log10("Capture probability") +
   theme_classic() +
-  theme(legend.position = "bottom") -> p1
+  theme(strip.background = element_blank(),
+        legend.position = "bottom") -> p1
 
 p1
 
@@ -144,9 +146,9 @@ p2
 t.test(I(log10(divChao)) ~ day, data.post.s)
 ```
 
-```{r}
+```{r fig.width=8, fig.height=4}
 plot_grid(p1, p2,
-          labels = c("A", "B")) -> fig6
+          labels = c("A", "B"), rel_widths = c(2, 1)) -> fig6
 fig6
 ggsave("../figures/fig6.pdf", fig6)
 ```

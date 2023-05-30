@@ -17,6 +17,7 @@ library(stringr)
 library(ggridges)
 library(stringdist)
 library(data.table)
+library(scales)
 library(cowplot)
 library(broom)
 ```
@@ -138,7 +139,9 @@ data.b <- data.s.s %>%
   group_by(donor, specific, quantile) %>%
   mutate(Pbeta = dbeta(p, alpha, beta)) %>%
   ungroup
+```
 
+```{r}
 p1 <- data.b %>%
   filter(Pbeta > 1e-5) %>%
   mutate(specificity = ifelse(specific, "A02_LLW", "Unknown"),
@@ -151,13 +154,15 @@ p1 <- data.b %>%
              linetype = specificity,
              color = quantile)) +
   geom_line() +
-  scale_color_brewer("Quantile", palette = "Set1") +
+  scale_color_brewer("Quantile", palette = "Spectral") +
   scale_x_log10("Capture probability") +
   scale_linetype_manual("Specificity", values = c("solid", "dotted")) +
-  ylab("Pbeta") +
+  ylab("Beta distribution density") +
+  annotation_logticks(sides = "b") +
   facet_wrap(.~donor, ncol = 2) +
   theme_classic() +
-  theme(legend.position = "bottom", 
+  theme(strip.background = element_blank(),
+        legend.position = "bottom", 
         legend.box="vertical")
 p1
 ```
@@ -195,22 +200,29 @@ p2 <- data.s.e %>%
              linetype = emerging,
              shape = emerging,
              color = quantile)) +
-  geom_point(size = 1) +
+  geom_point(size = 2) +
   geom_errorbar(aes(ymin = p - 6 * sdp, ymax = p + 6 * sdp), 
                 linetype = "solid", width = 0.2) +
   geom_line(aes(group = paste(emerging, quantile))) +
   scale_y_log10("Capture probability") +
   xlab("Donor") +
   scale_linetype_manual("Emerging", values = c("dotted", "solid")) +
-  scale_color_brewer("Quantile", palette = "Set1") +
+  scale_color_brewer("Quantile", palette = "Spectral") +
   scale_shape_manual("Emerging", values = c(1, 16)) +
+  annotation_logticks(sides = "l") +
   theme_classic() +
   theme(legend.position = "bottom", legend.box="vertical")
 p2
 ```
 
-```{r fig.width=6, fig.height=4}
-plot_grid(p1, p2,
+```{r fig.width=8, fig.height=4}
+plot_grid(p1 +  
+            theme(legend.title = element_text(size = 8), 
+                  legend.text = element_text(size = 7)),
+          p2 + 
+            scale_color_brewer(guide = F, "Quantile", palette = "Spectral") +
+            theme(legend.title = element_text(size = 8), 
+                  legend.text = element_text(size = 7)),
           labels = c("A", "B"),
           label_size = 10) -> fig4
 fig4
