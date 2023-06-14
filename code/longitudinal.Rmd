@@ -16,6 +16,8 @@ library(scales)
 library(cowplot)
 ```
 
+### Aging data
+
 ```{r}
 meta.a <- read_tsv("../data/aging_3year/metadata.txt")
 meta.a
@@ -84,6 +86,21 @@ mdl <- lm(LogRecaptureProb ~ count + sample,
             mutate(LogRecaptureProb = log10(alpha / (alpha + beta))))
 summary(mdl)
 ```
+
+Estimating clonotype size. The re-capture probability is $P = 1 - e^{-fR}$, so $f = -ln(1-P)/R$ where $R\sim10^6$ number of reads
+
+```{r}
+data.a.s %>%
+  group_by(sample) %>%
+  mutate(total = sum(count * (alpha + beta)),
+         weight = count * (alpha + beta) / total) %>%
+  mutate(P = alpha / (alpha + beta),
+         f = -log(1-P) / total,
+         fmean = sum(weight * f),
+         cells = fmean * 1e11)
+```
+
+### Yellow fever data
 
 ```{r message=FALSE}
 meta.v <- read_tsv("../data/yellow_fever_vac/metadata.txt") %>%
@@ -181,6 +198,7 @@ fig3
 ggsave("../figures/fig3.pdf", fig3)
 ```
 
-```{r}
 
+```{r}
+#E
 ```

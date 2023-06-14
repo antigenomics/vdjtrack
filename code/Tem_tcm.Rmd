@@ -131,6 +131,11 @@ data.post.s <- data.post %>%
               2 / count[which(quantile == "doubleton")])
 
 data.post.s %>%
+  .$patient %>%
+  unique %>%
+  length
+
+data.post.s %>%
   ggplot(aes(x = as.factor(day),
              y = divChao)) +
   geom_line(aes(group = patient)) +

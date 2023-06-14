@@ -60,6 +60,11 @@ data.survival.s <- data.survival %>%
 ```
 
 ```{r fig.width=8, fig.height=4}
+data.survival.s %>%
+  .$donor %>%
+  unique %>%
+  length
+
 p3 <- data.survival.s %>%
   ggplot(aes(x = clones.post / clones.pre,
              y = alpha / (alpha + beta), 
