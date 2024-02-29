@@ -20,7 +20,7 @@ library(gridExtra)
 library(cowplot)
 ```
 
-Load data
+# Load data
 
 ```{r message = F}
 data <- tibble(fname = list.files("../data/hsct/")) %>%
@@ -42,7 +42,7 @@ data %>%
   unique
 ```
 
-Merge data
+# Merge data
 
 ```{r}
 data.m <- full_join(data %>%
@@ -126,7 +126,7 @@ p2 <- data.m %>%
   theme(legend.position = "bottom")
 p2
 ```
-
+# Capture probability calculation
 ```{r}
 alpha.prior <- 1
 beta.prior <- 1
@@ -186,7 +186,7 @@ p4 <- data.s %>%
   theme(legend.position = "bottom")
 p4
 ```
-
+# Linear model
 ```{r}
 mdl <- lm(LogRecaptureProb ~ Quantile + LogDiversityRatio,
           data.s %>%
