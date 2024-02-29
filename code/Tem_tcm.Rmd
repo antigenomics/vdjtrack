@@ -14,7 +14,7 @@ library(ggplot2)
 library(cowplot)
 ```
 
-Fetch metadata
+# Fetch metadata
 
 ```{r}
 meta <- 
@@ -33,7 +33,7 @@ meta <-
   mutate(patient = str_split_fixed(fname, "_", 2)[,1])
 ```
 
-Load data
+# Load and process data
 
 ```{r message = F}
 meta %>%
@@ -47,9 +47,9 @@ meta %>%
   summarise(count = sum(count)) %>%
   ungroup -> data
 ```
-
-Process data: count singletons and doubletons, select pre- and post-transplant 
-datasets and merge them, annotate Tem and Tcm
+# Clonotype size grouping
+Count singletons and doubletons, select pre- and post-transplant 
+datasets and merge them
 
 ```{r}
 data <- data %>%
@@ -70,7 +70,11 @@ data.pre.m <- data.pre %>%
   group_modify(~left_join(.x, data.post %>% select(-quantile), 
                           by = c("patient", "tcr_key"))) %>%
   mutate(day = ifelse(is.na(day), "Missing", day))
+```
 
+# Capture probability
+
+```{r}
 data.pre.s <- data.pre.m %>%
   group_by(patient, subset, quantile, day) %>%
   summarise(count = n() + 1) %>%
@@ -83,7 +87,7 @@ data.pre.s <- data.pre.m %>%
          group_by(patient, day = as.character(day)) %>%
          summarise(size.post = n() + 1))
 ```
-
+# Linear model
 Linear modelling of fraction donor sampled vs donor/recepient sample size, 
 compare Tem and Tcm
 
