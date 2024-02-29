@@ -21,7 +21,6 @@ library(cowplot)
 ```
 
 # Load data
-
 ```{r message = F}
 data <- tibble(fname = list.files("../data/hsct/")) %>%
   mutate(donor = startsWith(fname, "don"), 
@@ -43,7 +42,6 @@ data %>%
 ```
 
 # Merge data
-
 ```{r}
 data.m <- full_join(data %>%
                       filter(donor) %>%
